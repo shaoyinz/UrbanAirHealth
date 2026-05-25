@@ -1,0 +1,58 @@
+# Concentration-response (CR) functions for PM2.5 → premature mortality.
+#
+# We use a simplified log-linear approximation of the GBD 2019 Integrated
+# Exposure-Response (IER) curves at low-to-moderate PM2.5 (≤ 50 µg/m³),
+# parameterized as a hazard ratio per 10 µg/m³ increment. This is the
+# form used in most epidemiological meta-analyses (Burnett 2018, Vodonos
+# 2018) and is exact enough for Phase 1 building-level prioritization.
+# Phase 4 swaps for the full nonlinear IER once the spatial pipeline is
+# validated.
+#
+# CR is:  attributable_fraction = 1 - exp( -β · (PM2.5 - counterfactual) )
+# where β = ln(HR_per_10) / 10.
+#
+# Counterfactual (theoretical-minimum-risk exposure level, TMREL) is
+# 2.4 µg/m³ per GBD 2019. Below TMREL, AF = 0.
+
+counterfactual_ugm3: 2.4
+
+# DW = disability weight (GBD 2019); YLD/death = years lived with
+# disability per fatal case (rough US-tuned values). YLL/death derived
+# from US life expectancy (78.8 yr) minus mean age at death per cause.
+# Baseline incidence rates are 2022 US all-ages, per 100k population.
+causes:
+  ihd:
+    name: "Ischemic heart disease"
+    hazard_ratio_per_10ugm3: 1.17    # Burnett 2018
+    baseline_mortality_per_100k: 92.2
+    yll_per_death: 12.8
+    yld_per_death: 0.6
+    disability_weight: 0.224
+  stroke:
+    name: "Cerebrovascular disease (stroke)"
+    hazard_ratio_per_10ugm3: 1.12
+    baseline_mortality_per_100k: 39.5
+    yll_per_death: 11.4
+    yld_per_death: 1.1
+    disability_weight: 0.316
+  copd:
+    name: "Chronic obstructive pulmonary disease"
+    hazard_ratio_per_10ugm3: 1.13
+    baseline_mortality_per_100k: 40.5
+    yll_per_death: 9.7
+    yld_per_death: 4.2
+    disability_weight: 0.383
+  lung_cancer:
+    name: "Tracheal, bronchus, and lung cancer"
+    hazard_ratio_per_10ugm3: 1.20
+    baseline_mortality_per_100k: 33.4
+    yll_per_death: 14.6
+    yld_per_death: 0.4
+    disability_weight: 0.451
+  lri:
+    name: "Lower respiratory infections"
+    hazard_ratio_per_10ugm3: 1.18
+    baseline_mortality_per_100k: 14.1
+    yll_per_death: 18.5
+    yld_per_death: 0.2
+    disability_weight: 0.133

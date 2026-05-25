@@ -1,0 +1,50 @@
+# Pinned upstream data releases. The pipeline is idempotent per
+# (release, region) tuple — bumping any field forces a re-ingest of that
+# source under a release-tagged path.
+
+airnow:
+  # AirNow publishes hourly PM2.5/O3 observations. We pin a *date window*
+  # rather than a release version because AirNow is a rolling archive.
+  # The window string is the idempotency key in GCS paths.
+  # Format: YYYYMMDD-YYYYMMDD (inclusive). Bump for a fresh pull.
+  window: "20250101-20251231"
+  parameters: [PM2.5]
+  base_url: "https://files.airnowtech.org/airnow/"  # public hourly CSVs
+  api_url: "https://www.airnowapi.org/aq/data/"     # observation-by-monitor JSON
+
+epa_aqs:
+  # EPA AQS publishes annual & daily aggregates as CSV ZIPs going back
+  # to 1980. Used for historical backfill and IDW training before AirNow
+  # coverage starts (2003 nationally).
+  year: "2024"
+  parameters: [88101]   # PM2.5 FRM/FEM Mass (μg/m³)
+  base_url: "https://aqs.epa.gov/aqsweb/airdata/"
+
+overture:
+  # Public releases retained ~60 days; we copy the slice we need on
+  # ingest and depend on our GCS copy thereafter. Same pin as
+  # UrbanFloodRisk for cross-project parquet compatibility.
+  release: "2026-04-15.0"
+  s3_uri: "s3://overturemaps-us-west-2/release/2026-04-15.0/theme=buildings/type=building/"
+  theme: buildings
+  type: building
+
+cdc_svi:
+  year: 2022
+  url: "https://svi.cdc.gov/Documents/Data/2022/csv/states/SVI_2022_US.csv"
+
+census_acs:
+  # 5-year ACS used for tract population, for per-building occupancy
+  # estimates. Vintage 2018–2022 to align with SVI 2022.
+  year: 2022
+  product: "acs5"
+  variables:
+    total_population: B01001_001E
+
+# Phase 1 targets the LA basin. Phase 2 expands to California, Phase 4
+# to CONUS. AOI bbox is (W, S, E, N) in EPSG:4326.
+aoi:
+  name: la_basin
+  bbox: [-118.95, 33.70, -117.65, 34.35]
+  state_fips: "06"
+  state_abbr: "CA"

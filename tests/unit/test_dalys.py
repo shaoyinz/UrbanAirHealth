@@ -1,0 +1,208 @@
+"""Unit tests for the DALY scoring library.
+
+Covers the pure-math primitives that the Spark UDF will call: IDW
+interpolation, attributable-fraction log-linear CR, per-cause DALY
+aggregation, and the trapezoidal integrator lifted from
+``floodpipe.scoring.ead.expected_annual_damage``.
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from airhealth.scoring.dalys import (
+    CauseCR,
+    CRConfig,
+    attributable_fraction,
+    expected_annual_dalys,
+    idw_interpolate,
+    integrate_health_burden,
+    load_concentration_response,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CR_YAML = REPO_ROOT / "config" / "concentration_response.yaml"
+
+
+# ---------------------------------------------------------------------------
+# IDW
+# ---------------------------------------------------------------------------
+
+
+def test_idw_coincident_monitor_wins_exactly():
+    """A monitor at the building's lon/lat returns its value verbatim,
+    not blended with farther monitors."""
+    b_lon = np.array([-118.25])
+    b_lat = np.array([34.05])
+    m_lon = np.array([-118.25, -117.00])
+    m_lat = np.array([34.05, 34.00])
+    m_val = np.array([12.0, 999.0])
+    out = idw_interpolate(b_lon, b_lat, m_lon, m_lat, m_val)
+    assert out[0] == pytest.approx(12.0)
+
+
+def test_idw_two_equidistant_monitors_averages():
+    """Inverse-distance from equidistant monitors collapses to the
+    simple mean — guards against numerical drift in the IDW kernel."""
+    # Place building at midpoint, monitors symmetric on either side.
+    b_lon = np.array([-118.0])
+    b_lat = np.array([34.0])
+    m_lon = np.array([-118.1, -117.9])
+    m_lat = np.array([34.0, 34.0])
+    m_val = np.array([10.0, 20.0])
+    out = idw_interpolate(b_lon, b_lat, m_lon, m_lat, m_val)
+    assert out[0] == pytest.approx(15.0, rel=1e-6)
+
+
+def test_idw_max_km_drops_far_monitors():
+    """A monitor outside ``max_km`` must not contribute, even at power=2."""
+    b_lon = np.array([-118.0])
+    b_lat = np.array([34.0])
+    # Two monitors: one ~10 km, one ~500 km (across CA).
+    m_lon = np.array([-118.1, -122.0])
+    m_lat = np.array([34.0, 37.0])
+    m_val = np.array([10.0, 1000.0])
+    out = idw_interpolate(b_lon, b_lat, m_lon, m_lat, m_val, max_km=50.0)
+    assert out[0] == pytest.approx(10.0)
+
+
+def test_idw_no_monitors_in_range_returns_nan():
+    b_lon = np.array([-118.0])
+    b_lat = np.array([34.0])
+    m_lon = np.array([-122.0])
+    m_lat = np.array([37.0])
+    m_val = np.array([10.0])
+    out = idw_interpolate(b_lon, b_lat, m_lon, m_lat, m_val, max_km=10.0)
+    assert math.isnan(out[0])
+
+
+def test_idw_empty_monitor_set_returns_nan_array():
+    b_lon = np.array([-118.0, -117.0])
+    b_lat = np.array([34.0, 33.0])
+    out = idw_interpolate(b_lon, b_lat, np.array([]), np.array([]), np.array([]))
+    assert out.shape == (2,)
+    assert np.all(np.isnan(out))
+
+
+# ---------------------------------------------------------------------------
+# Concentration-response
+# ---------------------------------------------------------------------------
+
+
+def _toy_cause(hr_per_10: float = 1.10) -> CauseCR:
+    """Minimal cause for AF tests: HR=1.10 per 10 µg/m³."""
+    return CauseCR(
+        key="toy",
+        name="Toy disease",
+        beta_per_ugm3=float(np.log(hr_per_10) / 10.0),
+        baseline_mortality_per_100k=100.0,
+        yll_per_death=10.0,
+        yld_per_death=1.0,
+        disability_weight=0.5,
+    )
+
+
+def test_af_below_counterfactual_is_zero():
+    cause = _toy_cause()
+    pm = np.array([0.0, 1.0, 2.0])
+    af = attributable_fraction(pm, cause, counterfactual_ugm3=2.4)
+    assert np.allclose(af, 0.0)
+
+
+def test_af_matches_log_linear_formula():
+    """Spot-check AF at PM = 12.4 µg/m³, TMREL = 2.4, HR = 1.10/10:
+    AF = 1 - exp(-ln(1.10)/10 * 10) = 1 - 1/1.10 ≈ 0.0909."""
+    cause = _toy_cause(hr_per_10=1.10)
+    pm = np.array([12.4])
+    af = attributable_fraction(pm, cause, counterfactual_ugm3=2.4)
+    expected = 1.0 - 1.0 / 1.10
+    assert af[0] == pytest.approx(expected, rel=1e-6)
+
+
+def test_load_concentration_response_yaml_parses():
+    """The shipped YAML must round-trip into a CRConfig with all causes
+    populated and β computed from HR per 10 µg/m³."""
+    cr = load_concentration_response(CR_YAML)
+    assert cr.counterfactual_ugm3 == pytest.approx(2.4)
+    keys = {c.key for c in cr.causes}
+    assert keys == {"ihd", "stroke", "copd", "lung_cancer", "lri"}
+    ihd = next(c for c in cr.causes if c.key == "ihd")
+    assert ihd.beta_per_ugm3 == pytest.approx(np.log(1.17) / 10.0, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# DALY aggregation
+# ---------------------------------------------------------------------------
+
+
+def test_expected_annual_dalys_zero_pop_is_zero():
+    cr = load_concentration_response(CR_YAML)
+    pm = np.array([20.0, 30.0])
+    pop = np.array([0.0, 0.0])
+    out = expected_annual_dalys(pm, pop, cr)
+    for arr in out.values():
+        assert np.allclose(arr, 0.0)
+
+
+def test_expected_annual_dalys_scales_linearly_with_pop():
+    cr = load_concentration_response(CR_YAML)
+    pm = np.array([15.0, 15.0])
+    out_a = expected_annual_dalys(pm, np.array([100.0, 100.0]), cr)
+    out_b = expected_annual_dalys(pm, np.array([200.0, 200.0]), cr)
+    for k in out_a:
+        assert np.allclose(out_b[k], 2 * out_a[k])
+
+
+def test_expected_annual_dalys_per_cause_keys_match_config():
+    cr = load_concentration_response(CR_YAML)
+    pm = np.array([10.0])
+    out = expected_annual_dalys(pm, np.array([1.0]), cr)
+    assert set(out) == {c.key for c in cr.causes}
+
+
+# ---------------------------------------------------------------------------
+# Trapezoidal integrator (lifted from floodpipe.scoring.ead)
+# ---------------------------------------------------------------------------
+
+
+def test_integrate_health_burden_matches_hand_worked_two_point():
+    """Trapezoidal area between two return periods.
+
+        EAD-like = 0.5 * (1/T_lo - 1/T_hi) * (D_lo + D_hi)
+
+    With T_lo=10, T_hi=100, D_lo=1.0, D_hi=2.0:
+        0.5 * (0.1 - 0.01) * (1.0 + 2.0) = 0.135
+    """
+    burden = {10: np.array([1.0]), 100: np.array([2.0])}
+    out = integrate_health_burden(burden)
+    assert out[0] == pytest.approx(0.135, rel=1e-9)
+
+
+def test_integrate_health_burden_three_point_sums_segments():
+    """Three-period integration is the sum of two trapezoids; verify by
+    constructing one explicitly."""
+    burden = {
+        10: np.array([1.0]),
+        50: np.array([2.0]),
+        100: np.array([3.0]),
+    }
+    seg1 = 0.5 * (1 / 10 - 1 / 50) * (1.0 + 2.0)
+    seg2 = 0.5 * (1 / 50 - 1 / 100) * (2.0 + 3.0)
+    out = integrate_health_burden(burden)
+    assert out[0] == pytest.approx(seg1 + seg2, rel=1e-12)
+
+
+def test_integrate_health_burden_unsorted_keys_handled():
+    """Caller may pass dict in any order; integrator sorts by T ascending."""
+    sorted_ = integrate_health_burden({10: np.array([1.0]), 100: np.array([2.0])})
+    shuffled = integrate_health_burden({100: np.array([2.0]), 10: np.array([1.0])})
+    assert sorted_[0] == pytest.approx(shuffled[0], rel=1e-12)
+
+
+def test_integrate_health_burden_requires_two_points():
+    with pytest.raises(ValueError, match=">=2"):
+        integrate_health_burden({100: np.array([1.0])})
