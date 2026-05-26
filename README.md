@@ -22,9 +22,18 @@ Phase 1 — local prototype. **In progress.**
   for five PM2.5-attributable causes.
 - ✓ Ingest CLIs: `airhealth.ingest.{airnow,epa_aqs,overture}`. AOI is
   driven from `config/release.yaml`; retargeting is a one-line edit.
-- ✓ Unit tests: `pytest tests/unit/test_dalys.py` covers IDW kernel,
-  attributable-fraction formula, DALY aggregation, integrator.
-- ⏳ End-to-end notebook (`notebooks/exploration/01_la_basin_prototype.ipynb`).
+- ✓ Feature roll-ups `src/airhealth/features/` — hourly→daily,
+  completeness, annual mean / 98pct / peak-week, H3 r6–r9 indexing.
+- ✓ Local IO `src/airhealth/io/local.py` — AirNow window reader,
+  Overture centroid extraction (DuckDB spatial), H3 aggregation,
+  folium choropleth writer.
+- ✓ End-to-end notebook
+  `notebooks/exploration/01_la_basin_prototype.ipynb` —
+  AirNow → daily means → annual IDW → CR → DALYs → folium map.
+  Authored from `scripts/build_phase1_notebook.py` so cells stay terse.
+- ✓ Unit tests: `pytest tests/unit/` (26 tests) covers IDW, AF
+  formula, DALY aggregation, integrator, daily-mean, completeness,
+  annual metrics.
 - ⏳ Phase 2: Sedona job, Terraform, dbt models.
 
 ## Quickstart (local dev)
@@ -33,7 +42,7 @@ Phase 1 — local prototype. **In progress.**
 # venv (Python 3.14)
 uv venv --python 3.14
 source .venv/bin/activate
-uv pip install duckdb h3 pandas pyarrow folium requests pyyaml numpy pytest
+uv pip install duckdb h3 pandas pyarrow folium requests pyyaml numpy pytest nbformat nbclient ipykernel
 
 # unit tests (tests/conftest.py adds src/ to sys.path)
 pytest tests/unit -v
@@ -54,6 +63,26 @@ For real ingest:
 2. `gcloud auth login` and `gcloud config set project <PROJECT_ID>`.
 3. Bootstrap GCP infra (Phase 2 — Terraform pending).
 4. Drop the `--dry-run` flags above.
+
+## Phase 1 prototype run
+
+```bash
+# 1. Stage a day or three of AirNow + the Overture LA slice (one-time).
+export PYTHONPATH=src
+python -m airhealth.ingest.airnow   --project-id <PROJECT_ID> --max-days 7
+python -m airhealth.ingest.overture --project-id <PROJECT_ID>
+
+# 2. (Re)generate the notebook from scripts/ then execute it.
+python scripts/build_phase1_notebook.py
+jupyter execute notebooks/exploration/01_la_basin_prototype.ipynb
+
+# 3. Open the resulting folium choropleth.
+open data/la_basin_dalys_r8.html
+```
+
+The notebook reads whatever AirNow days are staged under
+`data/raw/airnow/` (and tolerates the `.parquet.uploaded` suffix), so a
+no-GCP run still works — populate the staging dir by hand if needed.
 
 ## Retargeting to a different AOI
 
