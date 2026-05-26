@@ -1,0 +1,21 @@
+version: 2
+
+# The silver zone is owned by the Sedona job in src/airhealth/spark/.
+# dbt only reads it. For the DuckDB target, stg_building_silver bypasses
+# this source and reads the GeoParquet directly via read_parquet on the
+# DBT_SILVER_GLOB env var (Sedona writes GeoParquet that DuckDB's
+# spatial extension reads natively). For the BigQuery target, this
+# source resolves to the external table Terraform creates over the GCS
+# silver zone.
+#
+# Column-level tests live on stg_building_silver in staging/schema.yml,
+# not here, because the DuckDB target's parquet-glob bypass means the
+# source itself isn't a queryable relation in that backend.
+sources:
+  - name: silver
+    description: "Enriched per-building exposure + DALY rows from the Sedona silver job."
+    schema: airhealth_silver_ext     # used by the BigQuery target only
+    tables:
+      - name: building_silver
+        description: "One row per Overture building × release × AOI."
+        identifier: building_silver

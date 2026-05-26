@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Wrapper around the dbt CLI installed in dbt/.venv/.
+#
+# Why a second venv? dbt-core 1.11 doesn't import on Python 3.14 yet
+# (mashumaro UnserializableField on dataclass schemas). The project
+# venv is pinned to 3.14 for pyspark / sedona parity with Dataproc
+# Serverless 2.2, so dbt gets its own 3.12 venv under dbt/.venv/.
+#
+# Bootstrap: see README §"dbt local dev" — `uv venv --python 3.12
+# dbt/.venv && uv pip install dbt-duckdb` is all it takes.
+#
+# This wrapper forwards every flag to dbt, ensures DBT_PROFILES_DIR
+# resolves to ./dbt (so the committed profiles.yml is found without
+# the operator's ~/.dbt/ shadowing it), and runs from the dbt/
+# directory so relative parquet globs in stg_building_silver.sql line
+# up with where the Sedona smoke wrote silver.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DBT_DIR="${REPO_ROOT}/dbt"
+DBT_VENV="${DBT_DIR}/.venv"
+
+if [[ ! -x "${DBT_VENV}/bin/dbt" ]]; then
+  echo "error: ${DBT_VENV}/bin/dbt missing. Bootstrap with:" >&2
+  echo "  uv venv --python 3.12 ${DBT_VENV}" >&2
+  echo "  VIRTUAL_ENV=${DBT_VENV} uv pip install 'dbt-duckdb>=1.9,<2'" >&2
+  exit 1
+fi
+
+export DBT_PROFILES_DIR="${DBT_DIR}"
+cd "${DBT_DIR}"
+exec "${DBT_VENV}/bin/dbt" "$@"

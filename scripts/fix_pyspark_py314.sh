@@ -26,7 +26,14 @@ if [[ ! -x "${VENV_PY}" ]]; then
   exit 1
 fi
 
-"${VENV_PY}" -m pip install --quiet 'cloudpickle==3.1.2'
+# uv-provisioned venvs don't ship pip; prefer `uv pip` when available and
+# fall back to module-pip otherwise. Idempotent — both forms upgrade in
+# place if cloudpickle is already at 3.1.2.
+if command -v uv >/dev/null 2>&1; then
+  VIRTUAL_ENV="${REPO_ROOT}/.venv" uv pip install --quiet 'cloudpickle==3.1.2'
+else
+  "${VENV_PY}" -m pip install --quiet 'cloudpickle==3.1.2'
+fi
 
 CP_INIT=$("${VENV_PY}" -c 'import pyspark, os; print(os.path.join(os.path.dirname(pyspark.__file__), "cloudpickle", "__init__.py"))')
 

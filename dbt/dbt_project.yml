@@ -1,0 +1,32 @@
+name: 'airhealth'
+version: '0.1.0'
+config-version: 2
+
+# Profiles live alongside this file so the repo is self-contained; pass
+# --profiles-dir dbt (or set DBT_PROFILES_DIR) when invoking.
+profile: 'airhealth'
+
+model-paths: ["models"]
+test-paths:  ["tests"]
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# --- Project conventions ---
+# Staging:      stg_*   - 1:1 rename/passthrough over a source.
+# Intermediate: int_*   - per-feature transforms; never the final mart.
+# Marts:        fct_*   - the gold-zone fact table the dashboard reads.
+#
+# All marts are date/release-tagged in the silver path. The local
+# DuckDB target materializes them as parquet under target/marts/, so
+# downstream tools (Looker proxy, kepler export, ad-hoc SQL) can read
+# the silver/gold zones uniformly via parquet glob.
+models:
+  airhealth:
+    staging:
+      +materialized: view        # cheap; silver is the on-disk truth
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: marts

@@ -11,7 +11,28 @@ data-source rationale.
 
 ## Status
 
-Phase 1 — local prototype. **In progress.**
+Phase 2 — single-region cloud lift. **In progress (vertical slice green).**
+
+- ✓ Sedona silver job `src/airhealth/spark/build_silver.py` — reads
+  raw Overture + AirNow, computes IDW exposure + per-cause AF + DALYs,
+  writes GeoParquet partitioned by H3 r7. Same scoring math as Phase 1
+  (imports `airhealth.scoring.dalys`), so the existing unit tests cover
+  the silver-job arithmetic.
+- ✓ Local smoke `scripts/smoke_silver_local.py` — stages the Phase-1
+  raw fixtures into a temp GCS-mirror layout and runs the Sedona job
+  via a pip-installed pyspark (`--local`, pulls Sedona JARs from Maven
+  Central). 2,000-building smoke completes in ~30 s on a laptop.
+- ✓ dbt models (`dbt/`) — staging passthrough + `fct_building_dalys`
+  mart, runs against DuckDB locally (`scripts/dbt build`) and is wired
+  for BigQuery via a second profile target. 12 data tests pass on the
+  smoke output: PK uniqueness, not-nulls, monitor_distance bucket
+  enum, and a guard against negative DALYs.
+- ⏳ Terraform: bootstrap (tfstate) + main (services, buckets,
+  BigQuery, Dataproc network). The existing manually-created project
+  + raw bucket will be `terraform import`ed rather than recreated.
+- ⏳ Dataproc Serverless submit script + README Phase-2 invocation.
+
+Phase 1 — local prototype. **Done.**
 
 - ✓ Scoring library `src/airhealth/scoring/dalys.py` — IDW + log-linear
   concentration-response + trapezoidal integrator (lifted from
@@ -99,6 +120,63 @@ aoi:
 Every ingest CLI and (in Phase 2) the Sedona job picks up the new AOI
 on the next run; the GCS path includes `aoi=<NAME>` so old and new
 slices coexist.
+
+## Phase 2 — local vertical slice
+
+```bash
+# 1. One-time: install pyspark + sedona into the project venv, then
+#    patch pyspark 3.5's bundled cloudpickle for Python 3.14 compat.
+uv pip install 'pyspark==3.5.0' 'apache-sedona==1.6.1' shapely 'cloudpickle==3.1.2'
+bash scripts/fix_pyspark_py314.sh
+
+# 2. Run the Sedona silver job over the LA-basin fixtures from Phase 1.
+#    --limit caps the building count; --keep-tmp leaves silver/ on disk
+#    so the next dbt step can read it.
+PYTHONPATH=src python scripts/smoke_silver_local.py --limit 5000 --keep-tmp
+#  → tmp dir: /var/folders/.../airhealth-silver-smoke-XXXXX
+
+# 3. One-time: bootstrap the dbt venv. dbt-core doesn't import on
+#    Python 3.14 yet, so dbt lives in its own 3.12 venv under dbt/.
+uv venv --python 3.12 dbt/.venv
+VIRTUAL_ENV=dbt/.venv uv pip install 'dbt-duckdb>=1.9,<2'
+
+# 4. Build the dbt models against the silver output above.
+SMOKE=/var/folders/.../airhealth-silver-smoke-XXXXX   # paste from step 2
+DBT_SILVER_GLOB="${SMOKE}/silver/buildings/release=*/aoi=*/*.parquet" \
+  scripts/dbt build
+#  → 1 view (stg_building_silver) + 1 table (fct_building_dalys)
+#    + 10 data tests pass. dbt/target/airhealth.duckdb holds the mart.
+```
+
+## Phase 2 — cloud invocation (Dataproc Serverless + BigQuery)
+
+```bash
+# 1. Bootstrap the Terraform state bucket (one-time).
+PROJECT_ID=urban-air-health-syz infra/terraform/bootstrap/bootstrap.sh
+
+# 2. Import the existing manually-created raw bucket so Terraform
+#    doesn't try to destroy-and-recreate it on first apply.
+cd infra/terraform
+cp terraform.tfvars.example terraform.tfvars   # edit if needed
+terraform init -backend-config=backend.hcl
+terraform import google_storage_bucket.raw \
+  "${PROJECT_ID:-urban-air-health-syz}-airhealth-raw"
+terraform plan    # raw bucket: no changes; silver/gold/BQ/SAs: create
+terraform apply
+
+# 3. Submit the Sedona silver job. Defaults to the AOI in
+#    config/release.yaml (LA basin); add --limit for a smoke.
+cd ../..
+PROJECT_ID=urban-air-health-syz scripts/submit_silver.sh --limit 50000
+
+# 4. Run dbt against the BigQuery target.
+GCP_PROJECT_ID=urban-air-health-syz scripts/dbt build --target bigquery
+```
+
+See `infra/terraform/bootstrap/README.md` for the import rationale and
+`scripts/submit_silver.sh` for the Dataproc Serverless property
+incantations (Sedona Scala-2.13 build, autoBroadcast cap, executor
+sizing).
 
 ## Relationship to UrbanFloodRisk
 

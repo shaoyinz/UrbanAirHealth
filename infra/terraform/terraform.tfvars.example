@@ -1,0 +1,5 @@
+project_id    = "urban-air-health-syz"
+region        = "us-central1"
+data_location = "US"
+# bucket_prefix     = "custom-prefix"   # optional; defaults to "${project_id}-airhealth"
+# bq_dataset_prefix = "airhealth"        # optional; underscores only (BQ rule)

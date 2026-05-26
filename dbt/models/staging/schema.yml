@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: stg_building_silver
+    description: |
+      Passthrough rename over the silver-zone building parquet. Column
+      docs here are the contract the Sedona silver job is held to —
+      bump them when build_silver.py adds a column.
+    columns:
+      - name: id
+        description: "Overture GERS building ID. Primary key."
+        data_tests:
+          - not_null
+          - unique
+      - name: pm25_annual_mean
+        description: "IDW-interpolated annual mean PM2.5 (µg/m³)."
+      - name: monitor_distance_km
+        description: "Great-circle km to the nearest AirNow/AQS monitor."
+      - name: daly_total
+        description: "Sum of per-cause expected annual DALYs."
+        data_tests:
+          - not_null
+      - name: h3_res7
+        description: "H3 resolution-7 cell — also the Spark shuffle key."
+        data_tests:
+          - not_null

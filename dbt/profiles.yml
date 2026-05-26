@@ -1,0 +1,39 @@
+# dbt profiles for the airhealth project. Two targets:
+#
+# - duckdb_local: vertical-slice dev target. Reads the silver GeoParquet
+#   the Sedona job wrote under a local path (default ../target/silver,
+#   override with DBT_SILVER_PATH), runs the models, and writes a
+#   self-contained airhealth.duckdb in dbt/target/. Use this for
+#   pre-commit checks and on a laptop without GCP auth.
+#
+# - bigquery: cloud target. Points dbt at BigQuery datasets created by
+#   the Terraform in infra/terraform/. Requires `gcloud auth
+#   application-default login` and the matching dataset names in
+#   bigquery.tf — keep them in sync.
+#
+# Default profile is duckdb_local so `dbt build` from this dir Just
+# Works for a contributor who's only run the Sedona smoke. Override
+# with `dbt build --target bigquery`.
+airhealth:
+  target: duckdb_local
+  outputs:
+    duckdb_local:
+      type: duckdb
+      path: "{{ env_var('DBT_DUCKDB_PATH', 'target/airhealth.duckdb') }}"
+      threads: 4
+      # The DuckDB spatial extension lets us read GeoParquet without
+      # decoding WKB by hand — Sedona writes the GeoParquet metadata
+      # GeoPandas / DuckDB expect.
+      extensions:
+        - spatial
+
+    bigquery:
+      type: bigquery
+      method: oauth
+      project: "{{ env_var('GCP_PROJECT_ID', 'urban-air-health-syz') }}"
+      dataset: airhealth_gold
+      location: US
+      threads: 8
+      priority: interactive
+      job_execution_timeout_seconds: 1200
+      job_retries: 1

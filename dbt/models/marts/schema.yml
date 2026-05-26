@@ -1,0 +1,35 @@
+version: 2
+
+models:
+  - name: fct_building_dalys
+    description: |
+      Headline gold-zone fact. One row per Overture building × release
+      × AOI. Columns mirror CLAUDE.md §Output exactly — bump the schema
+      doc when adding a column.
+    columns:
+      - name: building_id
+        description: "Overture GERS ID. Primary key."
+        data_tests:
+          - not_null
+          - unique
+      - name: h3_res7
+        description: "H3 r7 cell — the default partition key."
+        data_tests:
+          - not_null
+      - name: pm25_annual_mean
+        description: "IDW-interpolated annual mean PM2.5 (µg/m³)."
+      - name: daly_total
+        description: |
+          Sum of per-cause expected annual DALYs. Non-negative by
+          construction; the `daly_total_nonneg` test below catches a
+          flipped CR coefficient regression.
+        data_tests:
+          - not_null
+      - name: daly_per_capita
+        description: "daly_total / population. Null when population is null/zero."
+      - name: monitor_distance_bucket
+        description: "0-10km / 10-50km / 50-100km / 100km+ / unknown."
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['0-10km', '10-50km', '50-100km', '100km+', 'unknown']
