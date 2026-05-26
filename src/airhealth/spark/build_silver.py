@@ -136,12 +136,24 @@ def compute_monitor_stats(
     # daily mean per (aqsid, date), then per-aqsid annual metrics.
     daily = daily_mean(hourly)
     annual = annual_metrics(daily)
-    keep = annual["completeness"] >= min_completeness
-    annual = annual.loc[keep].dropna(subset=["annual_mean", "lat", "lon"])
-    if annual.empty:
+    kept = annual.loc[annual["completeness"] >= min_completeness].dropna(
+        subset=["annual_mean", "lat", "lon"]
+    )
+    if kept.empty:
+        # Surface the observed distribution so the failure points at its own
+        # root cause — usually partial-window ingest, occasionally a too-tight
+        # AOI bbox. Without this the only signal is the threshold value.
+        max_obs = float(annual["completeness"].max()) if not annual.empty else 0.0
+        n_days_seen = int(daily["date_utc"].nunique()) if not daily.empty else 0
         raise RuntimeError(
-            f"no monitors meet completeness ≥ {min_completeness}"
+            f"no monitors meet completeness ≥ {min_completeness} "
+            f"(observed: {len(annual)} monitors, "
+            f"max completeness {max_obs:.3f}, "
+            f"{n_days_seen} unique days in {airnow_glob}). "
+            f"For a partial-window smoke test, lower --min-completeness; "
+            f"for a real run, verify the AirNow ingest covered the full window."
         )
+    annual = kept
     return MonitorStats(
         ids=annual["aqsid"].to_numpy(dtype=object),
         lon=annual["lon"].to_numpy(dtype="float64"),

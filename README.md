@@ -11,7 +11,7 @@ data-source rationale.
 
 ## Status
 
-Phase 2 — single-region cloud lift. **In progress (vertical slice green).**
+Phase 2 — single-region cloud lift. **Done.**
 
 - ✓ Sedona silver job `src/airhealth/spark/build_silver.py` — reads
   raw Overture + AirNow, computes IDW exposure + per-cause AF + DALYs,
@@ -27,10 +27,11 @@ Phase 2 — single-region cloud lift. **In progress (vertical slice green).**
   for BigQuery via a second profile target. 12 data tests pass on the
   smoke output: PK uniqueness, not-nulls, monitor_distance bucket
   enum, and a guard against negative DALYs.
-- ⏳ Terraform: bootstrap (tfstate) + main (services, buckets,
-  BigQuery, Dataproc network). The existing manually-created project
-  + raw bucket will be `terraform import`ed rather than recreated.
-- ⏳ Dataproc Serverless submit script + README Phase-2 invocation.
+- ✓ Terraform: bootstrap (tfstate) + main (services, buckets,
+  BigQuery, Dataproc network). The manually-created raw bucket is
+  `terraform import`-ed; the rest is managed by `infra/terraform/`.
+- ✓ Dataproc Serverless submit script `scripts/submit_silver.sh` —
+  first end-to-end cloud run green on the LA-basin slice.
 
 Phase 1 — local prototype. **Done.**
 

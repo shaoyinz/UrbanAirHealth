@@ -353,7 +353,7 @@ All free, federal, and re-distributable.
   apply CR curves → render folium choropleth.
 - **Goal:** prove the analytical chain before any GCP cost.
 
-### Phase 2 — Single-region cloud pipeline (≈ 1–2 weeks)
+### Phase 2 — Single-region cloud pipeline (≈ 1–2 weeks). **Done.**
 - Lift Phase 1 to GCP, scope California.
 - Sedona on Dataproc Serverless (reuses session + Terraform from
   UrbanFloodRisk almost verbatim).
