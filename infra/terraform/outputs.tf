@@ -42,3 +42,25 @@ output "dbt_runner_sa" {
   description = "Email of the service account that runs dbt against BigQuery."
   value       = google_service_account.dbt_runner.email
 }
+
+# --- Phase 3 / Composer (null when var.composer_enabled = false) -------
+
+output "composer_runner_sa" {
+  description = "Email of the service account attached to the Composer environment. Null when Composer is disabled."
+  value       = var.composer_enabled ? google_service_account.composer_runner[0].email : null
+}
+
+output "composer_dag_gcs_prefix" {
+  description = "gs:// URL of the Composer-managed DAGs folder. Upload DAGs here with `gcloud composer environments storage dags import` or a plain gsutil cp. Null when Composer is disabled."
+  value       = var.composer_enabled ? google_composer_environment.airhealth[0].config[0].dag_gcs_prefix : null
+}
+
+output "composer_airflow_uri" {
+  description = "URL of the Airflow web UI for the Composer environment. Null when Composer is disabled."
+  value       = var.composer_enabled ? google_composer_environment.airhealth[0].config[0].airflow_uri : null
+}
+
+output "airnow_api_key_secret" {
+  description = "Secret Manager secret ID for the AirNow API key. Populate the value with `gcloud secrets versions add` after apply. Null when Composer is disabled."
+  value       = var.composer_enabled ? google_secret_manager_secret.airnow_api_key[0].secret_id : null
+}

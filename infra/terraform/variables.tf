@@ -27,6 +27,29 @@ variable "bq_dataset_prefix" {
   default     = "airhealth"
 }
 
+variable "composer_enabled" {
+  description = "Toggle Cloud Composer (Phase 3 orchestration) on/off. The env has a non-trivial idle cost (~$100+/mo at the smallest size), so default off. Flip to true in terraform.tfvars when you're ready to spend on the DAG."
+  type        = bool
+  default     = false
+}
+
+variable "composer_image_version" {
+  description = "Cloud Composer image version. Composer 3 + Airflow 2.x. Check `gcloud composer images list --location=$REGION` for current options; deprecates on a rolling schedule."
+  type        = string
+  default     = "composer-3-airflow-2.10.5-build.7"
+}
+
+variable "composer_environment_size" {
+  description = "Composer 3 environment size preset. SMALL is the lowest, sufficient for a daily AirNow DAG."
+  type        = string
+  default     = "ENVIRONMENT_SIZE_SMALL"
+
+  validation {
+    condition     = contains(["ENVIRONMENT_SIZE_SMALL", "ENVIRONMENT_SIZE_MEDIUM", "ENVIRONMENT_SIZE_LARGE"], var.composer_environment_size)
+    error_message = "composer_environment_size must be one of ENVIRONMENT_SIZE_{SMALL,MEDIUM,LARGE}."
+  }
+}
+
 locals {
   bucket_prefix     = var.bucket_prefix != "" ? var.bucket_prefix : "${var.project_id}-airhealth"
   bq_dataset_prefix = var.bq_dataset_prefix

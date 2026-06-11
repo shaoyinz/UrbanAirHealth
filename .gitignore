@@ -40,3 +40,7 @@ service-account*.json
 *.tfstate.*
 terraform.tfvars
 !terraform.tfvars.example
+backend.hcl
+!backend.hcl.example
+tfplan.out
+*.tfplan

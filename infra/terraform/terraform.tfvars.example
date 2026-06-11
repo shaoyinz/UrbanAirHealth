@@ -3,3 +3,11 @@ region        = "us-central1"
 data_location = "US"
 # bucket_prefix     = "custom-prefix"   # optional; defaults to "${project_id}-airhealth"
 # bq_dataset_prefix = "airhealth"        # optional; underscores only (BQ rule)
+
+# --- Phase 3 / Cloud Composer ----------------------------------------
+# Flip composer_enabled to true to provision the orchestration env.
+# Idle cost runs ~$100+/month at the smallest size — leave off until
+# the DAG is ready to run on a real schedule.
+# composer_enabled          = false
+# composer_image_version    = "composer-3-airflow-2.10.5-build.7"
+# composer_environment_size = "ENVIRONMENT_SIZE_SMALL"
