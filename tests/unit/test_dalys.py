@@ -14,10 +14,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from airhealth.scoring.dalys import (
+    ENGINE_MRBRT,
     CauseCR,
     CRConfig,
     attributable_fraction,
+    attributable_fraction_mrbrt,
     expected_annual_dalys,
     idw_interpolate,
     integrate_health_burden,
@@ -124,14 +129,113 @@ def test_af_matches_log_linear_formula():
 
 
 def test_load_concentration_response_yaml_parses():
-    """The shipped YAML must round-trip into a CRConfig with all causes
-    populated and β computed from HR per 10 µg/m³."""
+    """The shipped YAML must round-trip into a CRConfig with the MR-BRT
+    engine, all six GBD 2021 causes (including T2D), and β still derivable
+    from the HR fallback field so the legacy log-linear path keeps working
+    for regression tests."""
     cr = load_concentration_response(CR_YAML)
+    assert cr.engine == ENGINE_MRBRT
     assert cr.counterfactual_ugm3 == pytest.approx(2.4)
     keys = {c.key for c in cr.causes}
-    assert keys == {"ihd", "stroke", "copd", "lung_cancer", "lri"}
+    assert keys == {"ihd", "stroke", "copd", "lung_cancer", "lri", "t2d"}
     ihd = next(c for c in cr.causes if c.key == "ihd")
     assert ihd.beta_per_ugm3 == pytest.approx(np.log(1.17) / 10.0, rel=1e-9)
+    # Synthesized fallback curve must be populated in MR-BRT mode even
+    # when the GHDx parquet hasn't been downloaded yet.
+    assert ihd.rr_pm25_ugm3 is not None and ihd.rr_mean is not None
+    assert ihd.rr_pm25_ugm3[0] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# MR-BRT engine (GBD 2021 splines)
+# ---------------------------------------------------------------------------
+
+
+def _mrbrt_cause(curve_z: np.ndarray, curve_rr: np.ndarray) -> CauseCR:
+    """Minimal MR-BRT-style cause: hand-shaped RR(z) curve, no β."""
+    return CauseCR(
+        key="mrbrt_toy",
+        name="MR-BRT toy disease",
+        baseline_mortality_per_100k=100.0,
+        yll_per_death=10.0,
+        yld_per_death=1.0,
+        disability_weight=0.5,
+        rr_pm25_ugm3=curve_z,
+        rr_mean=curve_rr,
+    )
+
+
+def test_af_mrbrt_zero_below_tmrel():
+    z = np.array([0.0, 5.0, 10.0, 20.0, 50.0])
+    rr = np.array([1.0, 1.3, 1.5, 1.7, 1.9])
+    cause = _mrbrt_cause(z, rr)
+    af = attributable_fraction_mrbrt(np.array([0.0, 1.0, 2.4]), cause, counterfactual_ugm3=2.4)
+    assert np.allclose(af, 0.0)
+
+
+def test_af_mrbrt_matches_paf_from_rr_formula():
+    """Spot-check AF = 1 − RR(TMREL)/RR(PM) against hand-computed values
+    on a curve where the interp targets are exactly at tabulated bins
+    (so np.interp returns the tabulated RR without any blending error)."""
+    z = np.array([0.0, 2.4, 5.0, 10.0, 20.0, 50.0])
+    rr = np.array([1.0, 1.0, 1.20, 1.45, 1.60, 1.70])
+    cause = _mrbrt_cause(z, rr)
+    af = attributable_fraction_mrbrt(np.array([10.0, 20.0]), cause, counterfactual_ugm3=2.4)
+    assert af[0] == pytest.approx(1.0 - 1.0 / 1.45, rel=1e-9)
+    assert af[1] == pytest.approx(1.0 - 1.0 / 1.60, rel=1e-9)
+
+
+def test_af_mrbrt_monotonic_on_increasing_curve():
+    """AF must be monotonic non-decreasing on a monotonic non-decreasing
+    RR curve — a basic property the spline + PAF formula should preserve."""
+    z = np.arange(0, 51, dtype="float64")
+    rr = 1.0 + 0.02 * z  # strictly increasing
+    cause = _mrbrt_cause(z, rr)
+    pm = np.linspace(2.5, 50.0, 30)
+    af = attributable_fraction_mrbrt(pm, cause, counterfactual_ugm3=2.4)
+    assert np.all(np.diff(af) >= 0)
+
+
+def test_af_mrbrt_clipped_to_unit_interval():
+    """AF should never exceed 1 even on a degenerate curve where RR(PM)
+    > RR(TMREL) but the ratio is unusually large."""
+    z = np.array([0.0, 5.0, 50.0])
+    rr = np.array([1.0, 1.05, 100.0])
+    cause = _mrbrt_cause(z, rr)
+    af = attributable_fraction_mrbrt(np.array([50.0]), cause, counterfactual_ugm3=2.4)
+    assert 0.0 <= af[0] < 1.0
+
+
+def test_load_concentration_response_picks_up_real_curve(tmp_path):
+    """When a curve_path resolves to an existing parquet, the loader must
+    use the tabulated values verbatim rather than the HR fallback."""
+    # Build a tiny YAML pointing at a curve we control.
+    curves_dir = tmp_path / "cr_curves" / "gbd2021"
+    curves_dir.mkdir(parents=True)
+    z = np.arange(0, 11, dtype="float64")
+    rr = 1.0 + 0.05 * z  # distinct from any HR-synthesized shape
+    table = pa.table({"pm25_ugm3": z, "rr_mean": rr})
+    pq.write_table(table, curves_dir / "ihd.parquet")
+
+    yaml_path = tmp_path / "cr.yaml"
+    yaml_path.write_text(
+        "engine: mrbrt_gbd2021\n"
+        "counterfactual_ugm3: 2.4\n"
+        "causes:\n"
+        "  ihd:\n"
+        "    name: 'Ischemic heart disease'\n"
+        "    hazard_ratio_per_10ugm3: 1.17\n"
+        "    curve_path: cr_curves/gbd2021/ihd.parquet\n"
+        "    baseline_mortality_per_100k: 92.2\n"
+        "    yll_per_death: 12.8\n"
+        "    yld_per_death: 0.6\n"
+        "    disability_weight: 0.224\n"
+    )
+    cr = load_concentration_response(yaml_path)
+    ihd = next(c for c in cr.causes if c.key == "ihd")
+    # Curve must match the parquet, not the HR-synthesized 0..500 grid.
+    assert ihd.rr_pm25_ugm3.shape == (11,)
+    assert ihd.rr_mean[5] == pytest.approx(1.0 + 0.05 * 5)
 
 
 # ---------------------------------------------------------------------------

@@ -20,11 +20,14 @@ models:
         description: "IDW-interpolated annual mean PM2.5 (µg/m³)."
       - name: daly_total
         description: |
-          Sum of per-cause expected annual DALYs. Non-negative by
-          construction; the `daly_total_nonneg` test below catches a
-          flipped CR coefficient regression.
+          Sum of per-cause expected annual DALYs across the six GBD 2021
+          PM2.5 outcomes. Non-negative by construction; the
+          `daly_total_nonneg` test below catches a flipped CR coefficient
+          regression.
         data_tests:
           - not_null
+      - name: daly_t2d
+        description: "Type-2 diabetes mellitus DALYs (GBD 2021 outcome)."
       - name: daly_per_capita
         description: "daly_total / population. Null when population is null/zero."
       - name: monitor_distance_bucket

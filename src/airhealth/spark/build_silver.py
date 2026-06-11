@@ -10,15 +10,18 @@ Serverless. For every Overture building footprint it derives:
   - nearest_monitor_id, monitor_distance_km, monitor_neighbor_count for
     auditability (Pitfalls §monitor sparsity)
   - per-cause attributable fraction × baseline mortality × occupancy →
-    expected annual DALYs for {IHD, stroke, COPD, lung cancer, LRI},
-    plus the total
+    expected annual DALYs for the GBD 2021 PM2.5 outcomes
+    {IHD, stroke, COPD, lung cancer, LRI, T2D}, plus the total. The CR
+    engine is the MR-BRT spline shipped under config/cr_curves/gbd2021/
+    (see ``airhealth.scoring.dalys`` and ``scripts/fetch_mrbrt_curves.py``).
   - occupancy as ``area_m² × num_floors × 0.04 occupants/m²`` (Phase-1
     crude formula; Phase-4 swaps for ACS tract pop × HUD residential)
 
 Scoring math comes from ``airhealth.scoring.dalys`` unchanged — the same
-``idw_interpolate`` + ``expected_annual_dalys`` the notebook called are
-imported into a pandas UDF here, so the unit tests in
-``tests/unit/test_dalys.py`` cover the silver-job math too.
+``idw_interpolate`` + ``expected_annual_dalys`` the notebook called run
+inside the ``interpolate_exposure`` and ``attach_dalys`` ``mapInPandas``
+UDFs here, so the unit tests in ``tests/unit/test_dalys.py`` cover the
+silver-job math too.
 
 Run on Dataproc Serverless (Sedona JARs + the ``airhealth`` zip wired by
 the submit command in ``scripts/submit_silver.sh``):
@@ -51,8 +54,8 @@ from airhealth.ingest._common import (
     silver_bucket,
 )
 from airhealth.scoring.dalys import (
-    CauseCR,
     CRConfig,
+    expected_annual_dalys,
     idw_interpolate,
     load_concentration_response,
 )
@@ -321,7 +324,7 @@ def interpolate_exposure(buildings: DataFrame, stats: MonitorStats) -> DataFrame
 
 
 # --------------------------------------------------------------------------
-# Concentration-response → DALYs (Spark SQL; one literal per cause)
+# Concentration-response → DALYs (mapInPandas; MR-BRT engine per cause)
 # --------------------------------------------------------------------------
 def _population_expr() -> F.Column:
     """Phase-1 crude occupancy: area × floors × 0.04 occupants/m²."""
@@ -334,44 +337,60 @@ def _population_expr() -> F.Column:
     )
 
 
-def _af_expr(pm25: F.Column, cause: CauseCR, counterfactual: float) -> F.Column:
-    """AF = 1 - exp(-β · max(PM - TMREL, 0))."""
-    excess = F.greatest(pm25 - F.lit(counterfactual), F.lit(0.0))
-    return F.lit(1.0) - F.exp(-F.lit(cause.beta_per_ugm3) * excess)
+def _dalys_for_partition(
+    pdf: pd.DataFrame, cr: CRConfig, cause_keys: tuple[str, ...]
+) -> pd.DataFrame:
+    """Run ``expected_annual_dalys`` over one building partition.
+
+    The MR-BRT spline engine needs the tabulated RR(z) arrays per cause;
+    those arrays sit on ``CauseCR`` instances inside ``cr`` and Spark
+    pickles the closure once per task, so executors never re-load the
+    YAML. Output is keyed on ``id`` so the caller can equi-join back to
+    the geometry-carrying buildings DataFrame without dragging WKB
+    through pandas (same constraint as ``interpolate_exposure``).
+    """
+    pm = pdf["pm25_annual_mean"].to_numpy(dtype="float64")
+    pop = pdf["population"].to_numpy(dtype="float64")
+    per_cause = expected_annual_dalys(pm, pop, cr)
+    out = pd.DataFrame({"id": pdf["id"].to_numpy()})
+    total = np.zeros_like(pm)
+    pm_missing = np.isnan(pm)
+    for key in cause_keys:
+        col = per_cause[key]
+        out[f"daly_{key}"] = col
+        total = total + np.where(np.isnan(col), 0.0, col)
+    # Preserve null-propagation semantics from the previous Spark-SQL
+    # implementation: when pm25 is unknown the headline number is too.
+    out["daly_total"] = np.where(pm_missing, np.nan, total)
+    return out
 
 
 def attach_dalys(buildings: DataFrame, cr: CRConfig) -> DataFrame:
     """Append per-cause + total DALYs/yr per building.
 
-    Mirrors ``airhealth.scoring.dalys.expected_annual_dalys`` but in
-    pure Spark SQL — the YAML coefficients are baked into expression
-    literals so executors never need the YAML loader. ``pm25_annual_mean``
-    is the chronic-exposure driver per GBD methodology; episodic
-    metrics (p98_day, peak_week) ride along in silver for the dashboard
-    but do not feed the headline DALY.
+    Runs the MR-BRT spline engine inside a ``mapInPandas`` UDF: closed-form
+    Spark SQL can express log-linear (``1 − exp(−β · ΔPM)``) but not a
+    tabulated spline lookup. The pandas UDF re-uses the unit-tested
+    ``airhealth.scoring.dalys.expected_annual_dalys`` so the silver job
+    and the notebook stay on the same scoring code path. ``pm25_annual_mean``
+    is the chronic-exposure driver per GBD methodology; episodic metrics
+    (p98_day, peak_week) ride along in silver for the dashboard but do
+    not feed the headline DALY.
     """
+    cause_keys = tuple(c.key for c in cr.causes)
     out = buildings.withColumn("population", _population_expr())
-    pm = F.col("pm25_annual_mean")
-    daly_cols: list[str] = []
-    for cause in cr.causes:
-        af = _af_expr(pm, cause, cr.counterfactual_ugm3)
-        attributable_deaths = (
-            af
-            * F.lit(cause.baseline_mortality_per_100k / 1e5)
-            * F.col("population")
-        )
-        col_name = f"daly_{cause.key}"
-        out = out.withColumn(
-            col_name,
-            attributable_deaths * F.lit(cause.daly_per_death()),
-        )
-        daly_cols.append(col_name)
-    total = daly_cols[0]
-    total_expr = F.col(total)
-    for c in daly_cols[1:]:
-        total_expr = total_expr + F.col(c)
-    out = out.withColumn("daly_total", total_expr)
-    return out
+    daly_schema = "id string, " + ", ".join(
+        f"daly_{k} double" for k in cause_keys
+    ) + ", daly_total double"
+
+    def _run(iterator):
+        for pdf in iterator:
+            yield _dalys_for_partition(pdf, cr, cause_keys)
+
+    daly_df = out.select("id", "pm25_annual_mean", "population").mapInPandas(
+        _run, schema=daly_schema
+    )
+    return out.join(daly_df, "id", "left")
 
 
 # --------------------------------------------------------------------------
@@ -400,6 +419,7 @@ SILVER_COLUMNS = [
     "daly_copd",
     "daly_lung_cancer",
     "daly_lri",
+    "daly_t2d",
     "daly_total",
 ]
 

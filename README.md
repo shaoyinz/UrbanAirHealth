@@ -35,13 +35,16 @@ Phase 2 — single-region cloud lift. **Done.**
 
 Phase 1 — local prototype. **Done.**
 
-- ✓ Scoring library `src/airhealth/scoring/dalys.py` — IDW + log-linear
-  concentration-response + trapezoidal integrator (lifted from
-  UrbanFloodRisk's EAD math).
+- ✓ Scoring library `src/airhealth/scoring/dalys.py` — IDW + GBD 2021
+  MR-BRT spline concentration-response (with a log-linear GBD 2019
+  engine kept available as fallback) + trapezoidal integrator (lifted
+  from UrbanFloodRisk's EAD math).
 - ✓ Pinned upstream data in `config/release.yaml` (AirNow window, EPA
   AQS year, Overture release, AOI bbox).
-- ✓ GBD 2019 IER coefficients in `config/concentration_response.yaml`
-  for five PM2.5-attributable causes.
+- ✓ GBD 2021 MR-BRT splines + outcome weights in
+  `config/concentration_response.yaml` and tabulated curves under
+  `config/cr_curves/gbd2021/` for the six PM2.5-attributable causes
+  (IHD, stroke, COPD, lung cancer, LRI, T2D).
 - ✓ Ingest CLIs: `airhealth.ingest.{airnow,epa_aqs,overture}`. AOI is
   driven from `config/release.yaml`; retargeting is a one-line edit.
 - ✓ Feature roll-ups `src/airhealth/features/` — hourly→daily,

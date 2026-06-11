@@ -41,6 +41,7 @@ select
     daly_copd,
     daly_lung_cancer,
     daly_lri,
+    daly_t2d,
     daly_total,
     case
         when daly_total is null or population is null or population <= 0 then null

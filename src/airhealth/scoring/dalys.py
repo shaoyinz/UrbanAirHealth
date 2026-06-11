@@ -13,67 +13,162 @@ of monitor PM2.5 to building centroids**: same role in the pipeline
 (turn sparse anchor points into a per-building intensity field), entirely
 different physics.
 
+Two concentration-response engines ship side-by-side:
+
+* ``mrbrt_gbd2021`` — the SOTA path. Tabulated mean RR(z) splines from
+  IHME's MR-BRT (Meta-Regression Bayesian, Regularized, Trimmed) tool
+  per Brauer et al. (Lancet 2024). AF derives from the population
+  attributable formula ``1 − RR(TMREL) / RR(PM)`` so supra-linearity at
+  low PM and the sub-linear bend above ~50 µg/m³ are both preserved.
+* ``log_linear_gbd2019`` — the legacy approximation. ``AF = 1 − exp(−β · ΔPM)``
+  with ``β = ln(HR_per_10) / 10``. Kept available for regression-testing
+  and as the loader fallback when the bundled MR-BRT parquet files are
+  absent (CI before the GHDx download lands).
+
 All functions are pure NumPy + stdlib so a pandas UDF on Sedona can
 call them with zero extra deps.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
+import pyarrow.parquet as pq
 import yaml
+
+ENGINE_MRBRT = "mrbrt_gbd2021"
+ENGINE_LOG_LINEAR = "log_linear_gbd2019"
+
 
 # ---------------------------------------------------------------------------
 # Concentration-response config (loaded once per Spark task)
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class CauseCR:
-    """One disease/cause: log-linear CR around PM2.5 + outcome weights.
+    """One disease/cause: CR curve + outcome weights.
 
-    ``beta_per_ugm3`` is the slope of ln(HR) vs. PM2.5; it derives from
-    the published hazard-ratio-per-10-µg/m³ as ``ln(HR_per_10) / 10``.
+    Exactly one of ``beta_per_ugm3`` or ``(rr_pm25_ugm3, rr_mean)`` is the
+    primary CR signal, depending on the engine the loader was asked to
+    build. The legacy ``beta_per_ugm3`` field is always populated when a
+    ``hazard_ratio_per_10ugm3`` is present in YAML so log-linear tests
+    can keep pinning the legacy math even when the active engine is
+    MR-BRT.
     """
 
     key: str
     name: str
-    beta_per_ugm3: float
     baseline_mortality_per_100k: float
     yll_per_death: float
     yld_per_death: float
     disability_weight: float
+    beta_per_ugm3: float | None = None
+    # MR-BRT tabulated curve: parallel arrays, PM2.5 in µg/m³ (ascending)
+    # and the mean of the 1000 posterior MR-BRT draws for RR(z).
+    rr_pm25_ugm3: np.ndarray | None = field(default=None, repr=False)
+    rr_mean: np.ndarray | None = field(default=None, repr=False)
 
     def daly_per_death(self) -> float:
         """YLL + YLD weighted by disability — both already per fatal case."""
         return self.yll_per_death + self.disability_weight * self.yld_per_death
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class CRConfig:
+    engine: str
     counterfactual_ugm3: float
     causes: tuple[CauseCR, ...]
 
 
-def load_concentration_response(path: Path) -> CRConfig:
-    raw = yaml.safe_load(Path(path).read_text())
-    causes = tuple(
-        CauseCR(
-            key=key,
-            name=str(v["name"]),
-            beta_per_ugm3=float(np.log(v["hazard_ratio_per_10ugm3"]) / 10.0),
-            baseline_mortality_per_100k=float(v["baseline_mortality_per_100k"]),
-            yll_per_death=float(v["yll_per_death"]),
-            yld_per_death=float(v["yld_per_death"]),
-            disability_weight=float(v["disability_weight"]),
+def _synthesize_curve_from_hr(
+    hr_per_10: float, counterfactual_ugm3: float, max_ugm3: int = 500
+) -> tuple[np.ndarray, np.ndarray]:
+    """Tabulate ``RR(z) = HR_per_10 ** ((z − TMREL) / 10)`` at integer z.
+
+    Loader fallback for the MR-BRT engine when the bundled GHDx parquet
+    is missing. The resulting curve is mathematically identical to the
+    log-linear engine, so the synthesized-curve mode is *not* SOTA — it
+    just keeps the new code path runnable in CI before the data lands.
+    Above TMREL only; below TMREL the loader RR(z) = 1.0 so AF clamps
+    to 0 in ``attributable_fraction_mrbrt``.
+    """
+    z = np.arange(0, max_ugm3 + 1, dtype="float64")
+    excess = np.maximum(z - counterfactual_ugm3, 0.0)
+    rr = np.power(float(hr_per_10), excess / 10.0)
+    return z, rr
+
+
+def _load_curve_parquet(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Read a 2-column (pm25_ugm3, rr_mean) parquet into sorted arrays."""
+    table = pq.read_table(path, columns=["pm25_ugm3", "rr_mean"])
+    z = table.column("pm25_ugm3").to_numpy().astype("float64")
+    rr = table.column("rr_mean").to_numpy().astype("float64")
+    order = np.argsort(z)
+    return z[order], rr[order]
+
+
+def load_concentration_response(
+    path: Path, *, curve_root: Path | None = None
+) -> CRConfig:
+    """Parse the CR YAML into a CRConfig.
+
+    ``curve_root`` is the base for relative ``curve_path`` entries. When
+    omitted it defaults to the YAML file's directory, so the shipped
+    ``config/concentration_response.yaml`` resolves
+    ``cr_curves/gbd2021/<cause>.parquet`` against ``config/``.
+    """
+    yaml_path = Path(path)
+    raw = yaml.safe_load(yaml_path.read_text())
+    engine = str(raw.get("engine", ENGINE_LOG_LINEAR))
+    if engine not in (ENGINE_MRBRT, ENGINE_LOG_LINEAR):
+        raise ValueError(f"unknown CR engine: {engine!r}")
+    counterfactual = float(raw["counterfactual_ugm3"])
+    root = Path(curve_root) if curve_root else yaml_path.parent
+
+    causes: list[CauseCR] = []
+    for key, v in raw["causes"].items():
+        hr = v.get("hazard_ratio_per_10ugm3")
+        beta = float(np.log(hr) / 10.0) if hr is not None else None
+
+        rr_z: np.ndarray | None = None
+        rr_y: np.ndarray | None = None
+        if engine == ENGINE_MRBRT:
+            curve_path = v.get("curve_path")
+            resolved: Path | None = None
+            if curve_path is not None:
+                cp = Path(curve_path)
+                resolved = cp if cp.is_absolute() else root / cp
+            if resolved is not None and resolved.exists():
+                rr_z, rr_y = _load_curve_parquet(resolved)
+            elif hr is not None:
+                rr_z, rr_y = _synthesize_curve_from_hr(hr, counterfactual)
+            else:
+                raise ValueError(
+                    f"cause {key!r}: engine={engine} needs either an existing "
+                    f"curve_path or hazard_ratio_per_10ugm3 fallback"
+                )
+
+        causes.append(
+            CauseCR(
+                key=key,
+                name=str(v["name"]),
+                baseline_mortality_per_100k=float(v["baseline_mortality_per_100k"]),
+                yll_per_death=float(v["yll_per_death"]),
+                yld_per_death=float(v["yld_per_death"]),
+                disability_weight=float(v["disability_weight"]),
+                beta_per_ugm3=beta,
+                rr_pm25_ugm3=rr_z,
+                rr_mean=rr_y,
+            )
         )
-        for key, v in raw["causes"].items()
-    )
     return CRConfig(
-        counterfactual_ugm3=float(raw["counterfactual_ugm3"]),
-        causes=causes,
+        engine=engine,
+        counterfactual_ugm3=counterfactual,
+        causes=tuple(causes),
     )
 
 
@@ -162,14 +257,56 @@ def idw_interpolate(
 def attributable_fraction(
     pm25_ugm3: np.ndarray, cause: CauseCR, counterfactual_ugm3: float
 ) -> np.ndarray:
-    """AF = 1 − exp(−β · (PM − TMREL)), clipped at zero below TMREL.
+    """Log-linear (GBD 2019) AF = 1 − exp(−β · (PM − TMREL)).
 
-    Log-linear approximation. Exact enough for ≤ 50 µg/m³ exposures (most
-    of CONUS in non-fire conditions). Above that, the GBD IER bends
-    sublinear and this overestimates; Phase 4 swaps for the full IER.
+    Legacy engine. Exact enough for ≤ 50 µg/m³ exposures; over-estimates
+    in wildfire-smoke regimes where the IER bends sub-linear. Prefer
+    ``attributable_fraction_mrbrt`` when a tabulated MR-BRT curve is
+    available on the cause.
     """
+    if cause.beta_per_ugm3 is None:
+        raise ValueError(
+            f"cause {cause.key!r} has no beta_per_ugm3 — built for the MR-BRT "
+            f"engine? Use attributable_fraction_mrbrt instead."
+        )
     excess = np.maximum(np.asarray(pm25_ugm3, dtype="float64") - counterfactual_ugm3, 0.0)
     return 1.0 - np.exp(-cause.beta_per_ugm3 * excess)
+
+
+def attributable_fraction_mrbrt(
+    pm25_ugm3: np.ndarray, cause: CauseCR, counterfactual_ugm3: float
+) -> np.ndarray:
+    """MR-BRT spline AF = 1 − RR(TMREL) / RR(PM).
+
+    ``np.interp`` is the linear interpolator on the tabulated curve;
+    MR-BRT publishes the spline as ≈1-µg/m³ resolution so linear
+    interpolation between bins is within sub-percent of the spline
+    itself. Returns 0 when PM ≤ TMREL (no excess risk by construction)
+    and clips into ``[0, 1)`` to keep downstream multiplications well
+    behaved if a curve hiccup drives RR(PM) < RR(TMREL).
+    """
+    if cause.rr_pm25_ugm3 is None or cause.rr_mean is None:
+        raise ValueError(
+            f"cause {cause.key!r} has no MR-BRT curve — was the YAML loaded "
+            f"with the mrbrt_gbd2021 engine?"
+        )
+    pm = np.asarray(pm25_ugm3, dtype="float64")
+    rr_pm = np.interp(pm, cause.rr_pm25_ugm3, cause.rr_mean)
+    rr_tm = float(np.interp(counterfactual_ugm3, cause.rr_pm25_ugm3, cause.rr_mean))
+    # Guard against divide-by-zero on degenerate curves; MR-BRT RRs are
+    # always > 0 in practice but be defensive in case a fixture is sparse.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        af = 1.0 - rr_tm / np.where(rr_pm > 0, rr_pm, np.nan)
+    af = np.where(pm <= counterfactual_ugm3, 0.0, af)
+    return np.clip(af, 0.0, 0.9999999)
+
+
+def _af_fn_for_engine(engine: str) -> Callable[..., np.ndarray]:
+    if engine == ENGINE_MRBRT:
+        return attributable_fraction_mrbrt
+    if engine == ENGINE_LOG_LINEAR:
+        return attributable_fraction
+    raise ValueError(f"unknown CR engine: {engine!r}")
 
 
 def expected_annual_dalys(
@@ -181,14 +318,17 @@ def expected_annual_dalys(
 
         DALY_cause = AF_cause × (baseline_mortality/100k × pop) × DALY_per_death
 
-    Returns a dict keyed by cause; caller sums for the total or keeps the
-    breakdown for the dashboard's "top drivers" panel (analogous to the
-    flood project's SHAP top-3).
+    The AF function is selected from ``cr.engine`` so callers don't need
+    to know which curve shape is in play. Returns a dict keyed by cause
+    so the caller can sum for the total or keep the breakdown for the
+    dashboard's "top drivers" panel (analogous to the flood project's
+    SHAP top-3).
     """
+    af_fn = _af_fn_for_engine(cr.engine)
     pop = np.asarray(population, dtype="float64")
     result: dict[str, np.ndarray] = {}
     for c in cr.causes:
-        af = attributable_fraction(pm25_ugm3, c, cr.counterfactual_ugm3)
+        af = af_fn(pm25_ugm3, c, cr.counterfactual_ugm3)
         attributable_deaths = af * (c.baseline_mortality_per_100k / 1e5) * pop
         result[c.key] = attributable_deaths * c.daly_per_death()
     return result

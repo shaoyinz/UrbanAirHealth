@@ -51,5 +51,6 @@ select
     daly_copd,
     daly_lung_cancer,
     daly_lri,
+    daly_t2d,
     daly_total
 from src

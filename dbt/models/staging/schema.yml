@@ -17,9 +17,15 @@ models:
       - name: monitor_distance_km
         description: "Great-circle km to the nearest AirNow/AQS monitor."
       - name: daly_total
-        description: "Sum of per-cause expected annual DALYs."
+        description: |
+          Sum of per-cause expected annual DALYs across the six GBD 2021
+          PM2.5 outcomes (IHD, stroke, COPD, lung cancer, LRI, T2D).
         data_tests:
           - not_null
+      - name: daly_t2d
+        description: |
+          Type-2 diabetes mellitus DALYs (added in GBD 2021). Heavily
+          YLD-dominated relative to the other five causes.
       - name: h3_res7
         description: "H3 resolution-7 cell — also the Spark shuffle key."
         data_tests:

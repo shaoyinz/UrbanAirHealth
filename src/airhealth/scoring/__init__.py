@@ -6,6 +6,7 @@ job calls them inside a pandas UDF; dbt tests can import them too.
 
 from airhealth.scoring.dalys import (
     attributable_fraction,
+    attributable_fraction_mrbrt,
     expected_annual_dalys,
     idw_interpolate,
     integrate_health_burden,
@@ -14,6 +15,7 @@ from airhealth.scoring.dalys import (
 
 __all__ = [
     "attributable_fraction",
+    "attributable_fraction_mrbrt",
     "expected_annual_dalys",
     "idw_interpolate",
     "integrate_health_burden",

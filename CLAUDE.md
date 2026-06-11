@@ -25,7 +25,7 @@ A BigQuery table with one row per building × year:
 - Exposure: annual mean PM2.5 (µg/m³), 98th-percentile-day, peak-week
 - Hazard reference: nearest monitor ID, distance to monitor (km), IDW
   neighbor count, monitor data completeness
-- Per-cause attributable fraction for {IHD, stroke, COPD, lung cancer, LRI}
+- Per-cause attributable fraction for {IHD, stroke, COPD, lung cancer, LRI, T2D}
 - **Expected Annual DALYs** in years per building per year, total and per cause
 - ML-predicted PM2.5 with per-building SHAP attributions for top drivers
 - Equity overlay: CDC Social Vulnerability Index at the tract,
@@ -146,31 +146,38 @@ so per-call broadcast size stays bounded.
 
 ### Component 2 — Concentration-response (CR)
 
-Log-linear approximation of the GBD 2019 Integrated Exposure-Response
-curves, parameterized as hazard ratio per 10 µg/m³:
+MR-BRT (Meta-Regression Bayesian, Regularized, Trimmed) splines from
+the GBD 2021 Risk Factors collaboration (Brauer et al., Lancet 2024).
+Each cause has a tabulated mean RR(z) curve from IHME's MR-BRT tool;
+AF derives from the population attributable formula:
 
 ```
-AF_cause(PM) = 1 − exp(−β_cause · (PM − TMREL)),   TMREL = 2.4 µg/m³
-β_cause = ln(HR_per_10) / 10
+AF_cause(PM) = 1 − RR_cause(TMREL) / RR_cause(PM),   TMREL = 2.4 µg/m³
 ```
 
-Five PM2.5-attributable causes (Burnett 2018, GBD 2019):
+`np.interp` against the tabulated curve preserves the supra-linear
+slope at low PM2.5 (the regime that covers most of CONUS) and the
+sub-linear bend above ~50 µg/m³ that the older log-linear approximation
+over-estimates.
 
-| Cause | HR per 10 µg/m³ |
+Six PM2.5-attributable outcomes (GBD 2021):
+
+| Cause | HR per 10 µg/m³ (log-linear fallback) |
 |-------|-----------------|
 | Ischemic heart disease (IHD) | 1.17 |
 | Cerebrovascular disease (stroke) | 1.12 |
 | Chronic obstructive pulmonary disease (COPD) | 1.13 |
 | Tracheal/bronchus/lung cancer | 1.20 |
 | Lower respiratory infections (LRI) | 1.18 |
+| Type-2 diabetes mellitus (T2D) — added in GBD 2021 | 1.07 |
 
-Coefficients live in `config/concentration_response.yaml` so a new GBD
-release is a one-file bump.
-
-**Phase-1 simplification.** Log-linear is exact at low-to-moderate PM2.5
-(≤ 50 µg/m³) — most of CONUS in non-fire conditions. Above that, GBD
-IER bends sublinear and this overestimates. Phase 4 swaps for the full
-nonlinear IER; flagged in `Pitfalls`.
+Engine name (`mrbrt_gbd2021`), counterfactual, curve paths, and
+per-cause baseline mortality / YLL / YLD / DW all live in
+`config/concentration_response.yaml` so a new GBD release is a one-file
+bump plus a re-run of `scripts/fetch_mrbrt_curves.py`. The legacy
+log-linear engine (`log_linear_gbd2019`) stays selectable for
+regression-testing and acts as the loader fallback when the bundled
+MR-BRT parquets are absent (CI before the GHDx download lands).
 
 ### Component 3 — Population
 
@@ -386,9 +393,14 @@ All free, federal, and re-distributable.
   IDW's smoothing makes the gap invisible but wrong. Flag buildings
   whose nearest monitor exceeds 100 km and report exposure with a
   `monitor_distance_km` column; Phase 4 ML gap-fill is the fix.
-- **Log-linear CR overestimates above 50 µg/m³.** The GBD IER bends
-  sublinear in wildfire-smoke conditions. Document the regime where the
-  estimate is reliable; Phase 4 swaps for full nonlinear IER.
+- **MR-BRT curves require a GHDx download.** The shipped pipeline
+  defaults to the `mrbrt_gbd2021` engine; the actual spline values live
+  in `config/cr_curves/gbd2021/<cause>.parquet`. Until a developer runs
+  `scripts/fetch_mrbrt_curves.py` against the IHME draws CSV, the
+  loader falls back to a log-linear curve synthesized from the
+  `hazard_ratio_per_10ugm3` summary in the YAML — mathematically
+  equivalent to the legacy `log_linear_gbd2019` engine and therefore
+  *not* SOTA. Real GBD 2021 numbers require the GHDx fetch.
 - **AirNow vs EPA AQS reconciliation.** AirNow is real-time +
   preliminary; EPA AQS is finalized 6 months later. For overlapping
   periods the two won't agree exactly — pick AQS when both exist
