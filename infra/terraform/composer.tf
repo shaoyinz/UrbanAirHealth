@@ -52,6 +52,20 @@ resource "google_storage_bucket_iam_member" "composer_raw_reader" {
   member = "serviceAccount:${google_service_account.composer_runner[0].email}"
 }
 
+# The daily AirNow DAG (dags/air_pipeline_dag.py, task ingest_airnow) runs
+# on the Composer worker and writes one date partition per run to the raw
+# zone. objectCreator (not objectAdmin) is the narrowest scope that allows
+# it: the ingest skips dates that already exist, so it only ever creates new
+# objects — a forced overwrite/backfill is a manual op that can borrow a
+# broader role temporarily. This is the one write scope the Composer SA
+# holds directly; silver/gold writes still go through impersonated runners.
+resource "google_storage_bucket_iam_member" "composer_raw_writer" {
+  count  = var.composer_enabled ? 1 : 0
+  bucket = google_storage_bucket.raw.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.composer_runner[0].email}"
+}
+
 resource "google_storage_bucket_iam_member" "composer_silver_reader" {
   count  = var.composer_enabled ? 1 : 0
   bucket = google_storage_bucket.silver.name
