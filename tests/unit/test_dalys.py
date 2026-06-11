@@ -18,7 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from airhealth.scoring.dalys import (
-    ENGINE_MRBRT,
+    ENGINE_MRBRT_GBD2019,
     CauseCR,
     CRConfig,
     attributable_fraction,
@@ -129,21 +129,28 @@ def test_af_matches_log_linear_formula():
 
 
 def test_load_concentration_response_yaml_parses():
-    """The shipped YAML must round-trip into a CRConfig with the MR-BRT
-    engine, all six GBD 2021 causes (including T2D), and β still derivable
-    from the HR fallback field so the legacy log-linear path keeps working
-    for regression tests."""
+    """The shipped YAML must round-trip into a CRConfig with the GBD 2019
+    MR-BRT engine, all six PM2.5 causes (including T2D), and β still
+    derivable from the HR fallback field so the legacy log-linear path
+    keeps working for regression tests."""
     cr = load_concentration_response(CR_YAML)
-    assert cr.engine == ENGINE_MRBRT
+    assert cr.engine == ENGINE_MRBRT_GBD2019
     assert cr.counterfactual_ugm3 == pytest.approx(2.4)
     keys = {c.key for c in cr.causes}
     assert keys == {"ihd", "stroke", "copd", "lung_cancer", "lri", "t2d"}
     ihd = next(c for c in cr.causes if c.key == "ihd")
     assert ihd.beta_per_ugm3 == pytest.approx(np.log(1.17) / 10.0, rel=1e-9)
-    # Synthesized fallback curve must be populated in MR-BRT mode even
-    # when the GHDx parquet hasn't been downloaded yet.
+    # The MR-BRT curve must be populated — from the bundled GBD 2019
+    # parquet when present, else the HR-synthesized fallback. Either way
+    # the curve starts at exposure 0.
     assert ihd.rr_pm25_ugm3 is not None and ihd.rr_mean is not None
     assert ihd.rr_pm25_ugm3[0] == pytest.approx(0.0)
+    # Guard against a silent regression to the HR-synthesized fallback
+    # (0..500 grid): the bundled GBD 2019 spline runs to 2500 µg/m³ and
+    # has the genuine supra-linear shape (RR@12 ≈ 1.22, distinct from the
+    # log-linear 1.17**0.96 ≈ 1.16).
+    assert ihd.rr_pm25_ugm3[-1] == pytest.approx(2500.0)
+    assert 1.18 < float(np.interp(12.0, ihd.rr_pm25_ugm3, ihd.rr_mean)) < 1.26
 
 
 # ---------------------------------------------------------------------------

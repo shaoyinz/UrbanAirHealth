@@ -1,40 +1,58 @@
 # Concentration-response (CR) functions for PM2.5 → premature mortality.
 #
-# Engine: MR-BRT splines from the GBD 2021 Risk Factors collaboration
-# (Brauer et al., Lancet 2024). MR-BRT = Meta-Regression Bayesian,
-# Regularized, Trimmed; the IHME tool that synthesises ambient air
-# pollution + household solid-fuel + secondhand-tobacco evidence into a
-# single supra-linear concentration-response curve per outcome.
+# Engine: MR-BRT splines from IHME's Global Burden of Disease study.
+# MR-BRT = Meta-Regression Bayesian, Regularized, Trimmed; the IHME tool
+# that synthesises ambient air pollution + household solid-fuel +
+# secondhand-tobacco evidence into a single supra-linear
+# concentration-response curve per outcome.
+#
+# VINTAGE: the bundled curves are GBD **2019** (engine: mrbrt_gbd2019),
+# from the "GBD 2019 Particulate Matter Risk Curves" GHDx record. GBD
+# 2021 is the eventual target (engine string mrbrt_gbd2021, curves under
+# cr_curves/gbd2021/), but the 2021 release was not accessible at build
+# time, so we use the 2019 splines and label them honestly rather than
+# pass 2019 numbers off as 2021. The AF math is vintage-independent; only
+# the curve parquets change on a release bump.
 #
 # Curves are bundled as tabulated mean RR(z) per cause under
-# config/cr_curves/gbd2021/<cause>.parquet (run scripts/fetch_mrbrt_curves.py
-# after downloading the IHME GHDx draws CSV — see that script's header
-# for the GHDx record ID and download instructions). When a curve file is
-# absent, the loader falls back to a log-linear curve synthesised from
-# `hazard_ratio_per_10ugm3` so unit tests and CI keep passing before the
-# GHDx download lands. AF is then computed as
+# config/cr_curves/gbd2019/<cause>.parquet. Regenerate with:
+#   python scripts/fetch_mrbrt_curves.py \
+#     --input <unzipped IHME_GBD_2019_PM_RISK_SUMM dir> \
+#     --outdir config/cr_curves/gbd2019 \
+#     --cause-col label --exposure-col exposure_spline --rr-col mean
+# IHD and stroke are shipped age-specific (cvd_ihd_25…_95); the script
+# averages the 15 age curves unweighted into one all-ages curve (Phase-1
+# simplification — see that script's collapse_curves docstring).
+#
+# When a curve file is absent, the loader falls back to a log-linear
+# curve synthesised from `hazard_ratio_per_10ugm3` so unit tests and CI
+# keep passing before the curves are bundled. AF is computed as
 #   AF = 1 − RR(TMREL) / RR(PM2.5)
 # which preserves supra-linear shape at low PM and the sub-linear bend
-# above ~50 µg/m³ that log-linear over-estimates.
+# above ~50 µg/m³ that log-linear over-estimates. The GBD 2019 curves are
+# published *unscaled* to the TMREL (RR > 1 below TMREL); dividing by
+# RR(TMREL) here applies that scaling, so the raw `mean` column is fed in
+# as-is — no pre-scaling of the parquet.
 #
 # Counterfactual (theoretical-minimum-risk exposure level, TMREL) is
-# 2.4 µg/m³ per GBD 2019/2021. Below TMREL, AF = 0.
+# 2.4 µg/m³ — the lower bound of GBD's 2.4–5.9 TMREL uniform; a
+# conservative-high choice for attributed burden. Below TMREL, AF = 0.
 
-engine: mrbrt_gbd2021
+engine: mrbrt_gbd2019
 counterfactual_ugm3: 2.4
 
 # Per-cause outcome parameters. `hazard_ratio_per_10ugm3` is the legacy
-# GBD 2019 log-linear summary, retained as the loader fallback and to
-# keep the existing log-linear unit tests pinned. `curve_path` (relative
-# to this YAML's directory) is the MR-BRT spline — wins when present.
+# log-linear summary, retained as the loader fallback and to keep the
+# log-linear unit tests pinned. `curve_path` (relative to this YAML's
+# directory) is the MR-BRT spline — wins when present.
 #
 # Baseline mortality is 2022 US all-ages per 100k (CDC WONDER underlying
-# cause). YLL/YLD per fatal case + DW are GBD 2021 US reference values.
+# cause). YLL/YLD per fatal case + DW are GBD US reference values.
 causes:
   ihd:
     name: "Ischemic heart disease"
     hazard_ratio_per_10ugm3: 1.17
-    curve_path: cr_curves/gbd2021/ihd.parquet
+    curve_path: cr_curves/gbd2019/ihd.parquet
     baseline_mortality_per_100k: 92.2
     yll_per_death: 12.8
     yld_per_death: 0.6
@@ -42,7 +60,7 @@ causes:
   stroke:
     name: "Cerebrovascular disease (stroke)"
     hazard_ratio_per_10ugm3: 1.12
-    curve_path: cr_curves/gbd2021/stroke.parquet
+    curve_path: cr_curves/gbd2019/stroke.parquet
     baseline_mortality_per_100k: 39.5
     yll_per_death: 11.4
     yld_per_death: 1.1
@@ -50,7 +68,7 @@ causes:
   copd:
     name: "Chronic obstructive pulmonary disease"
     hazard_ratio_per_10ugm3: 1.13
-    curve_path: cr_curves/gbd2021/copd.parquet
+    curve_path: cr_curves/gbd2019/copd.parquet
     baseline_mortality_per_100k: 40.5
     yll_per_death: 9.7
     yld_per_death: 4.2
@@ -58,7 +76,7 @@ causes:
   lung_cancer:
     name: "Tracheal, bronchus, and lung cancer"
     hazard_ratio_per_10ugm3: 1.20
-    curve_path: cr_curves/gbd2021/lung_cancer.parquet
+    curve_path: cr_curves/gbd2019/lung_cancer.parquet
     baseline_mortality_per_100k: 33.4
     yll_per_death: 14.6
     yld_per_death: 0.4
@@ -66,20 +84,21 @@ causes:
   lri:
     name: "Lower respiratory infections"
     hazard_ratio_per_10ugm3: 1.18
-    curve_path: cr_curves/gbd2021/lri.parquet
+    curve_path: cr_curves/gbd2019/lri.parquet
     baseline_mortality_per_100k: 14.1
     yll_per_death: 18.5
     yld_per_death: 0.2
     disability_weight: 0.133
-  # Added in GBD 2021: PM2.5 → type-2 diabetes mellitus. HR_10 is the
-  # GBD 2019/2021 log-linear summary; MR-BRT spline takes precedence when
-  # the curve file is bundled. Baseline mortality is CDC WONDER 2022 US
-  # rate for ICD-10 E11 (~95% of all diabetes deaths). T2D is heavily
-  # YLD-dominated (years lived with disability before fatal event).
+  # PM2.5 → type-2 diabetes mellitus. Present in the GBD 2019 PM risk
+  # curves (label t2_dm); MR-BRT spline takes precedence when the curve
+  # file is bundled, else the HR_10 log-linear fallback. Baseline
+  # mortality is CDC WONDER 2022 US rate for ICD-10 E11 (~95% of all
+  # diabetes deaths). T2D is heavily YLD-dominated (years lived with
+  # disability before fatal event).
   t2d:
     name: "Type 2 diabetes mellitus"
     hazard_ratio_per_10ugm3: 1.07
-    curve_path: cr_curves/gbd2021/t2d.parquet
+    curve_path: cr_curves/gbd2019/t2d.parquet
     baseline_mortality_per_100k: 26.0
     yll_per_death: 13.2
     yld_per_death: 9.5

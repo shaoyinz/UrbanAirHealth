@@ -46,13 +46,17 @@ import pyarrow.parquet as pq
 # substrings the IHME CSV typically uses. Matching is case-insensitive
 # substring; override with --cause-map if a future release renames a
 # cause.
+# Patterns include both the human-readable cause names (used by some
+# combined-CSV releases) and the GBD `label`/file-name codes used by the
+# GBD 2019 multi-file summary bundle (cvd_ihd_*, cvd_stroke_*, resp_copd,
+# neo_lung, lri, t2_dm). Matching is case-insensitive substring.
 DEFAULT_CAUSE_MAP: dict[str, list[str]] = {
-    "ihd": ["ischemic heart", "ihd"],
-    "stroke": ["stroke", "cerebrovascular"],
-    "copd": ["copd", "chronic obstructive"],
-    "lung_cancer": ["lung cancer", "tracheal", "tbl"],
+    "ihd": ["ischemic heart", "cvd_ihd", "ihd"],
+    "stroke": ["cvd_stroke", "stroke", "cerebrovascular"],
+    "copd": ["resp_copd", "copd", "chronic obstructive"],
+    "lung_cancer": ["neo_lung", "lung cancer", "tracheal", "tbl"],
     "lri": ["lower respiratory", "lri"],
-    "t2d": ["diabetes", "t2dm", "type 2"],
+    "t2d": ["t2_dm", "diabetes", "t2dm", "type 2"],
 }
 
 
@@ -97,13 +101,25 @@ def collapse_curves(
     exposure_col: str,
     rr_col: str,
 ) -> dict[str, pd.DataFrame]:
-    """Group by (cause, exposure) and average RR over the draws.
+    """Reduce raw rows to one mean RR(z) curve per cause key.
 
-    Some IHME releases ship a pre-collapsed file with one row per
-    (cause, exposure) — in that case the groupby is a no-op and the mean
-    is just the only value.
+    Two reductions happen here:
+
+    * Over draws — a draws release has many rows per (cause, exposure);
+      grouping on exposure and taking the mean collapses them. A
+      pre-collapsed summary release already has one row per
+      (cause, exposure), so the groupby is a no-op.
+    * Over age groups — GBD 2019 ships IHD and stroke as 15 age-specific
+      curves each (``cvd_ihd_25`` … ``cvd_ihd_95``). All 15 match the same
+      cause key, and we average them **unweighted** into a single
+      all-ages curve. This is a Phase-1 simplification: GBD itself
+      estimates age-specific PAFs and death-weights them when aggregating
+      burden. A death-weighted collapse is the Phase-4 refinement. The
+      other four PM2.5 causes have exactly one source curve, so the
+      average is an identity.
     """
-    out: dict[str, pd.DataFrame] = {}
+    matched: dict[str, list[pd.DataFrame]] = {k: [] for k in DEFAULT_CAUSE_MAP}
+    sources: dict[str, list[str]] = {k: [] for k in DEFAULT_CAUSE_MAP}
     for cause_label, group in df.groupby(cause_col):
         for key, patterns in DEFAULT_CAUSE_MAP.items():
             if _match_cause(str(cause_label), patterns):
@@ -111,19 +127,44 @@ def collapse_curves(
                     group.groupby(exposure_col, as_index=False)[rr_col]
                     .mean()
                     .rename(columns={exposure_col: "pm25_ugm3", rr_col: "rr_mean"})
-                    .sort_values("pm25_ugm3")
-                    .reset_index(drop=True)
                 )
-                tidy["pm25_ugm3"] = tidy["pm25_ugm3"].astype("float64")
-                tidy["rr_mean"] = tidy["rr_mean"].astype("float64")
-                out[key] = tidy
+                matched[key].append(tidy)
+                sources[key].append(str(cause_label))
                 break
+
+    out: dict[str, pd.DataFrame] = {}
+    for key, curves in matched.items():
+        if not curves:
+            continue
+        # Concatenate the (one or many) source curves and average RR at
+        # each shared exposure value — the age-group collapse for CVD.
+        tidy = (
+            pd.concat(curves, ignore_index=True)
+            .groupby("pm25_ugm3", as_index=False)["rr_mean"]
+            .mean()
+            .sort_values("pm25_ugm3")
+            .reset_index(drop=True)
+        )
+        tidy["pm25_ugm3"] = tidy["pm25_ugm3"].astype("float64")
+        tidy["rr_mean"] = tidy["rr_mean"].astype("float64")
+        out[key] = tidy
+        if len(curves) > 1:
+            print(
+                f"  note: {key} averaged (unweighted) from {len(curves)} "
+                f"age-specific curves: {', '.join(sorted(sources[key]))}",
+                file=sys.stderr,
+            )
     return out
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--input", type=Path, help="path to IHME draws CSV")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        help="path to an IHME risk-curve CSV, or a directory of per-cause "
+        "CSVs (e.g. the unzipped GBD 2019 PM_RISK_SUMM bundle)",
+    )
     parser.add_argument(
         "--outdir",
         type=Path,
@@ -145,7 +186,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.input.exists():
         parser.error(f"input not found: {args.input}")
 
-    df = pd.read_csv(args.input)
+    if args.input.is_dir():
+        csvs = sorted(
+            p for ext in ("*.CSV", "*.csv") for p in args.input.glob(ext)
+        )
+        if not csvs:
+            parser.error(f"no CSV files found in directory {args.input}")
+        df = pd.concat((pd.read_csv(p) for p in csvs), ignore_index=True)
+    else:
+        df = pd.read_csv(args.input)
     cause_col, exposure_col, rr_col = _resolve_columns(
         df, args.cause_col, args.exposure_col, args.rr_col
     )

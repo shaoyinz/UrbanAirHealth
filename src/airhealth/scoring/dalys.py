@@ -40,7 +40,15 @@ import pyarrow.parquet as pq
 import yaml
 
 ENGINE_MRBRT = "mrbrt_gbd2021"
+ENGINE_MRBRT_GBD2019 = "mrbrt_gbd2019"
 ENGINE_LOG_LINEAR = "log_linear_gbd2019"
+
+# MR-BRT spline engines. The AF math (1 − RR(TMREL)/RR(PM)) is identical
+# across GBD vintages — only the bundled curve parquets differ — so both
+# route through ``attributable_fraction_mrbrt``. The engine string records
+# *which* GBD release the curves under ``curve_path`` came from, so a
+# config is never silently mislabeled (2019 curves stay named 2019).
+MRBRT_ENGINES = (ENGINE_MRBRT, ENGINE_MRBRT_GBD2019)
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +132,7 @@ def load_concentration_response(
     yaml_path = Path(path)
     raw = yaml.safe_load(yaml_path.read_text())
     engine = str(raw.get("engine", ENGINE_LOG_LINEAR))
-    if engine not in (ENGINE_MRBRT, ENGINE_LOG_LINEAR):
+    if engine not in (*MRBRT_ENGINES, ENGINE_LOG_LINEAR):
         raise ValueError(f"unknown CR engine: {engine!r}")
     counterfactual = float(raw["counterfactual_ugm3"])
     root = Path(curve_root) if curve_root else yaml_path.parent
@@ -136,7 +144,7 @@ def load_concentration_response(
 
         rr_z: np.ndarray | None = None
         rr_y: np.ndarray | None = None
-        if engine == ENGINE_MRBRT:
+        if engine in MRBRT_ENGINES:
             curve_path = v.get("curve_path")
             resolved: Path | None = None
             if curve_path is not None:
@@ -302,7 +310,7 @@ def attributable_fraction_mrbrt(
 
 
 def _af_fn_for_engine(engine: str) -> Callable[..., np.ndarray]:
-    if engine == ENGINE_MRBRT:
+    if engine in MRBRT_ENGINES:
         return attributable_fraction_mrbrt
     if engine == ENGINE_LOG_LINEAR:
         return attributable_fraction
