@@ -14,9 +14,11 @@
 #
 # Permission delegation. The Composer SA does NOT get direct write
 # scope on silver/gold/BigQuery datasets. Instead it gets
-# `roles/iam.serviceAccountUser` on the existing dataproc_runner and
-# dbt_runner SAs, and the Airflow operators (DataprocSubmitBatchOperator,
-# BigQueryInsertJobOperator with impersonation_chain) act-as those SAs.
+# `roles/iam.serviceAccountUser` on dataproc_runner (to attach it to a
+# batch) and `roles/iam.serviceAccountTokenCreator` on dbt_runner (to
+# mint tokens for dbt + BigQuery impersonation), and the Airflow
+# operators (DataprocCreateBatchOperator, BigQueryCheckOperator with
+# impersonation_chain) act-as those SAs. See the per-resource note below.
 # This keeps the Phase-2 IAM surface unchanged and means a compromised
 # Airflow worker can't bypass the narrow per-zone scopes already in
 # compute.tf.
@@ -109,10 +111,21 @@ resource "google_project_iam_member" "composer_runner_dataproc_editor" {
 }
 
 # --- Cross-SA impersonation --------------------------------------------
-# `serviceAccountUser` on each runner SA = "may set this SA as the
-# identity of a job I'm creating." This is the bridge that lets Airflow
-# submit Dataproc/BQ work under the existing Phase-2 SAs without
-# inheriting their data-plane scopes itself.
+# Two different mechanisms, two different roles — they are NOT
+# interchangeable:
+#
+#   * Dataproc batch → serviceAccountUser. "May attach this SA as the
+#     identity of a resource I create" (the batch's
+#     execution_config.service_account). A control-plane attach, no token
+#     is minted by Composer.
+#   * dbt + BigQuery checks → serviceAccountTokenCreator. dbt's
+#     impersonate_service_account and the operators' impersonation_chain
+#     both call iamcredentials.generateAccessToken to mint a short-lived
+#     token for the dbt SA. serviceAccountUser does NOT authorize that —
+#     token minting requires serviceAccountTokenCreator.
+#
+# This is the bridge that lets Airflow run Dataproc/BQ work under the
+# existing Phase-2 SAs without inheriting their data-plane scopes itself.
 
 resource "google_service_account_iam_member" "composer_actas_dataproc_runner" {
   count              = var.composer_enabled ? 1 : 0
@@ -121,10 +134,10 @@ resource "google_service_account_iam_member" "composer_actas_dataproc_runner" {
   member             = "serviceAccount:${google_service_account.composer_runner[0].email}"
 }
 
-resource "google_service_account_iam_member" "composer_actas_dbt_runner" {
+resource "google_service_account_iam_member" "composer_impersonate_dbt_runner" {
   count              = var.composer_enabled ? 1 : 0
   service_account_id = google_service_account.dbt_runner.name
-  role               = "roles/iam.serviceAccountUser"
+  role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:${google_service_account.composer_runner[0].email}"
 }
 

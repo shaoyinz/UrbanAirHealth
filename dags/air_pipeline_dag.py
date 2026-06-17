@@ -34,27 +34,29 @@ Every write acts-as a Phase-2 runner SA:
   * Dataproc silver batch → runs as ``airhealth-dataproc`` (set as the
     batch's ``execution_config.service_account``; the Composer SA holds
     ``serviceAccountUser`` on it + ``dataproc.editor`` to create batches).
-  * dbt + BigQuery checks → ``airhealth-dbt`` via ``impersonation_chain``
-    (the Composer SA holds ``serviceAccountUser`` on it + ``bigquery.jobUser``).
+  * dbt + BigQuery checks → ``airhealth-dbt`` via impersonation (dbt's
+    ``impersonate_service_account`` / the operators' ``impersonation_chain``)
+    (the Composer SA holds ``serviceAccountTokenCreator`` on it to mint
+    tokens + ``bigquery.jobUser``).
 
 ==============================  PREREQUISITES  ==============================
-This DAG is the orchestration *shape*. Three pieces must land alongside it
-before a real scheduled run succeeds end-to-end; each is flagged inline at
-the task that needs it.
+This DAG is the orchestration *shape*. The three code/infra pieces it
+depends on have all landed; what remains is image/deploy wiring on the
+Composer env itself (it doesn't exist until ``composer_enabled = true``).
 
-  [P1] Raw-zone writer. composer.tf grants ``airhealth-composer`` only
-       ``objectViewer`` on the raw bucket, but ingest_airnow writes there.
-       Add the ``composer_raw_writer`` grant (objectCreator) — see the
-       companion change in infra/terraform/composer.tf.
-  [P2] ``airhealth`` importable on the Composer image (pypi_packages or a
-       wheel under /home/airflow/gcs/plugins) AND a single-date AirNow
-       *API* entrypoint. The Phase-1 CLI (airhealth.ingest.airnow) pulls a
-       whole window from the public file dump; Phase 3 wants one {{ ds }}
-       via the keyed API (airnow.py docstring §2). See ingest_airnow.
-  [P3] dbt-bigquery reachable from the worker (pypi_packages or a
-       KubernetesPodOperator image), the dbt project synced to
-       AIRHEALTH_DBT_PROJECT_DIR, and the profiles.yml `bigquery` target
-       extended with ``impersonate_service_account: <airhealth-dbt SA>``.
+  [P1] Raw-zone writer — DONE. composer.tf grants ``airhealth-composer``
+       ``objectCreator`` on the raw bucket (``composer_raw_writer``) so
+       ingest_airnow can write its date partition.
+  [P2] Single-date AirNow *API* entrypoint — DONE. ``ingest_api_day`` in
+       airhealth.ingest.airnow pulls one {{ ds }} via the keyed API to the
+       same raw path the Phase-1 file-dump CLI uses. Still requires the
+       ``airhealth`` package importable on the Composer image (pypi_packages
+       or a wheel under /home/airflow/gcs/plugins). See ingest_airnow.
+  [P3] dbt → BigQuery impersonation — DONE in profiles.yml (the bigquery
+       target's ``impersonate_service_account`` reads ``DBT_BQ_IMPERSONATE_SA``,
+       set by _dbt_env below) and in composer.tf (the Composer SA holds
+       serviceAccountTokenCreator on the dbt SA). Still requires dbt-bigquery
+       on the worker and the dbt project synced to AIRHEALTH_DBT_PROJECT_DIR.
 
 Everything is gated off until ``composer_enabled = true`` in
 terraform.tfvars — the env doesn't exist yet, so this file only has to
@@ -259,7 +261,9 @@ def air_pipeline():
     _dbt_env = {
         "DBT_PROFILES_DIR": DBT_PROJECT_DIR,
         "GCP_PROJECT_ID": PROJECT_ID,
-        "DBT_DALY_RUNNER_SA": DBT_SA,  # consumed by profiles.yml impersonate_service_account
+        # Name must match the env_var() key profiles.yml reads for the
+        # bigquery target's impersonate_service_account.
+        "DBT_BQ_IMPERSONATE_SA": DBT_SA,
     }
 
     @task.bash(env=_dbt_env, append_env=True)
@@ -281,7 +285,10 @@ def air_pipeline():
     # --- 6. Data-quality gates on the mart ------------------------------
     # These read airhealth_gold; the Composer SA has no gold dataset role,
     # so it impersonates airhealth-dbt (dataViewer/Editor on gold) for the
-    # BigQuery jobs. This is the one branch that works with current IAM as-is.
+    # BigQuery jobs. Like the dbt tasks above, impersonation_chain mints a
+    # token via generateAccessToken, so the Composer SA needs
+    # serviceAccountTokenCreator (not just serviceAccountUser) on the dbt
+    # SA — see composer.tf composer_impersonate_dbt_runner.
     dq_fct_nonempty = BigQueryCheckOperator(
         task_id="dq_fct_nonempty",
         sql=f"SELECT COUNT(*) > 0 FROM `{FCT_TABLE}`",
