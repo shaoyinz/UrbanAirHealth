@@ -8,8 +8,12 @@
 #
 # - bigquery: cloud target. Points dbt at BigQuery datasets created by
 #   the Terraform in infra/terraform/. Requires `gcloud auth
-#   application-default login` and the matching dataset names in
-#   bigquery.tf — keep them in sync.
+#   application-default login`; that ADC principal then impersonates the
+#   airhealth-dbt runner SA (impersonate_service_account below), so dbt
+#   runs with exactly the SA's gold/silver_ext scope and no key file
+#   touches disk. The principal needs serviceAccountTokenCreator on the
+#   SA — add it to var.dbt_impersonators in terraform.tfvars and apply.
+#   Keep dataset names in sync with bigquery.tf.
 #
 # Default profile is duckdb_local so `dbt build` from this dir Just
 # Works for a contributor who's only run the Sedona smoke. Override
@@ -30,6 +34,7 @@ airhealth:
     bigquery:
       type: bigquery
       method: oauth
+      impersonate_service_account: "{{ env_var('DBT_BQ_IMPERSONATE_SA', 'airhealth-dbt@urban-air-health-syz.iam.gserviceaccount.com') }}"
       project: "{{ env_var('GCP_PROJECT_ID', 'urban-air-health-syz') }}"
       dataset: airhealth_gold
       location: US

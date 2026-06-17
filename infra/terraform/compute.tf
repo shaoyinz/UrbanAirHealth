@@ -66,6 +66,17 @@ resource "google_project_iam_member" "dbt_runner_bq_jobuser" {
   member  = "serviceAccount:${google_service_account.dbt_runner.email}"
 }
 
+# Developer impersonation: a human's ADC mints short-lived tokens for the
+# dbt SA (profiles.yml: impersonate_service_account), so local `dbt build
+# --target bigquery` runs with exactly the SA's gold/silver_ext scope and
+# leaves no downloaded key on disk. Members come from var.dbt_impersonators.
+resource "google_service_account_iam_member" "dbt_runner_token_creators" {
+  for_each           = toset(var.dbt_impersonators)
+  service_account_id = google_service_account.dbt_runner.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = each.value
+}
+
 # --- Bucket-level roles -------------------------------------------------
 # Principle: each SA gets the narrowest scope on each bucket. Versus
 # project-level storage roles, this prevents either runner from touching

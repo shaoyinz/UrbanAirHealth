@@ -33,6 +33,12 @@ variable "composer_enabled" {
   default     = false
 }
 
+variable "dbt_impersonators" {
+  description = "Principals (e.g. user:foo@bar.com / group:…) granted serviceAccountTokenCreator on the dbt runner SA, so a developer's ADC can impersonate it for `dbt … --target bigquery`. Set in terraform.tfvars; empty by default so automation doesn't widen access by accident."
+  type        = list(string)
+  default     = []
+}
+
 variable "composer_image_version" {
   description = "Cloud Composer image version. Composer 3 + Airflow 2.x. Check `gcloud composer images list --location=$REGION` for current options; deprecates on a rolling schedule."
   type        = string

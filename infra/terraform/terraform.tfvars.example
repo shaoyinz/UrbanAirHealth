@@ -4,6 +4,10 @@ data_location = "US"
 # bucket_prefix     = "custom-prefix"   # optional; defaults to "${project_id}-airhealth"
 # bq_dataset_prefix = "airhealth"        # optional; underscores only (BQ rule)
 
+# Developers whose ADC may impersonate the dbt runner SA for
+# `dbt … --target bigquery` (grants serviceAccountTokenCreator).
+# dbt_impersonators = ["user:you@example.com"]
+
 # --- Phase 3 / Cloud Composer ----------------------------------------
 # Flip composer_enabled to true to provision the orchestration env.
 # Idle cost runs ~$100+/month at the smallest size — leave off until
